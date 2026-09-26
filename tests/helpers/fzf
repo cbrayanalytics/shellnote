@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -eu
+if [ -n "${FZF_DEFAULT_OPTS:-}${FZF_DEFAULT_OPTS_FILE:-}${FZF_DEFAULT_COMMAND:-}" ]; then
+    printf 'unsafe fzf defaults survived\n' >&2
+    exit 2
+fi
+printf '%s\0' "$@" > "$TEST_PICKER_ARGS"
+case "${TEST_PICKER_MODE:-first}" in
+    cancel) cat > /dev/null; exit 130;;
+    fail) cat > /dev/null; exit 2;;
+esac
+picked=''
+while IFS= read -r row; do
+    printf '%s\n' "$row" >> "$TEST_PICKER_ROWS"
+    if [ -z "$picked" ] && { [ -z "${TEST_PICKER_MATCH:-}" ] || [[ "$row" == *"$TEST_PICKER_MATCH"* ]]; }; then
+        picked=$row
+    fi
+done
+[ -n "$picked" ] || exit 1
+printf '%s\n' "$picked"

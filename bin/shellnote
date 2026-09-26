@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+umask 077
+
+die() { printf 'shellnote: %s\n' "$*" >&2; exit 1; }
+require_command() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+info() {
+    local prefix=''
+    [ "${NOTE_EMOJI:-0}" != 1 ] || prefix='📝 '
+    if [ -t 1 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; then
+        printf '\033[32m%s%s\033[0m\n' "$prefix" "$*"
+    else
+        printf '%s%s\n' "$prefix" "$*"
+    fi
+}
+usage() {
+    printf '%s\n' \
+        'shellnote — private Markdown notes in your terminal' \
+        '' \
+        'Usage: shellnote [command]' \
+        '  (no command)       Browse and edit notes' \
+        '  init [--git]       Initialize notes storage (optionally Git)' \
+        '  new "Title"        Create and edit a note' \
+        '  find "Text"        Search note contents literally' \
+        '  tags [tag]         Browse tags or notes with an exact tag' \
+        '  commit "Message"   Commit Markdown notes locally' \
+        '  push               Push to the configured upstream' \
+        '  help, --help       Show this help' \
+        '' \
+        'NOTES_DIR overrides ~/.notes. NOTE_EMOJI=1 enables icons.' \
+        'NO_COLOR disables color. Notes are private files, not encrypted.'
+    printf '%s\n' 'Dependencies: Bash 3.2+, Neovim (nvim), fzf, ripgrep (rg); Git is optional.'
+}
+file_metadata() {
+    stat -c '%u %a' -- "$1" 2>/dev/null || stat -f '%u %Lp' -- "$1"
+}
+check_private() {
+    local metadata owner permissions
+    metadata=$(file_metadata "$1") || die "cannot inspect: $1"
+    owner=${metadata%% *}
+    permissions=${metadata#* }
+    [ "$owner" = "$UID" ] || die "not owned by your user: $1"
+    [ "$permissions" = "$2" ] || die "expected permissions 0$2: $1 (currently $permissions)"
+}
+resolve_notes_dir() {
+    notes_dir=${NOTES_DIR:-"$HOME/.notes"}
+    case "$notes_dir" in /*) ;; *) notes_dir="$PWD/$notes_dir";; esac
+    while [ "$notes_dir" != / ] && [ "${notes_dir%/}" != "$notes_dir" ]; do notes_dir=${notes_dir%/}; done
+    case "$notes_dir" in *$'\n'*|*$'\r'*) die 'storage directory cannot contain line breaks';; esac
+    local component=$notes_dir
+    while [ "$component" != / ]; do
+        if [ -L "$component" ]; then
+            case "$component" in /tmp|/var|/etc) ;; *) die "symlink storage path: $component";; esac
+        fi
+        component=$(dirname -- "$component") || exit 1
+    done
+}
+ensure_notes_dir() {
+    resolve_notes_dir
+    [ ! -L "$notes_dir" ] || die "symlink storage root: $notes_dir"
+    if [ ! -e "$notes_dir" ]; then
+        mkdir -p -- "$notes_dir" || die "cannot create storage: $notes_dir"
+    fi
+    [ -d "$notes_dir" ] || die "not a directory: $notes_dir"
+    check_private "$notes_dir" 700
+    notes_dir=$(CDPATH='' cd -- "$notes_dir" && pwd -P) || exit 1
+    export NOTES_DIR="$notes_dir"
+}
+validate_note_location() {
+    local candidate=$1 parent
+    [ -d "$notes_dir" ] && [ ! -L "$notes_dir" ] || die "unsafe storage root: $notes_dir"
+    check_private "$notes_dir" 700
+    case "$candidate" in "$notes_dir"/*.md) ;; *) die "not a Markdown note inside storage: $candidate";; esac
+    case "/${candidate#"$notes_dir"/}/" in */../*|*/./*) die "unsafe note path: $candidate";; esac
+    [ ! -L "$candidate" ] || die "symlink note: $candidate"
+    [ -f "$candidate" ] || die "not a regular note: $candidate"
+    parent=${candidate%/*}
+    while [ "$parent" != "$notes_dir" ]; do
+        [ "$parent" != / ] && [ ! -L "$parent" ] || die "unsafe note directory: $parent"
+        check_private "$parent" 700
+        parent=${parent%/*}
+    done
+}
+validate_note() {
+    validate_note_location "$1"
+    check_private "$1" 600
+}
+edit_note() {
+    local target=$1 line=$2 result=0
+    require_command nvim
+    validate_note "$target"
+    nvim -n -i NONE \
+        --cmd 'set noswapfile nobackup nowritebackup noundofile shada=' \
+        --cmd 'autocmd BufReadPre,BufNewFile * setlocal noswapfile noundofile | set nobackup nowritebackup shada=' \
+        -c 'set noswapfile nobackup nowritebackup noundofile shada=' \
+        "+$line" -- "$target" || result=$?
+    validate_note_location "$target"
+    local metadata
+    metadata=$(file_metadata "$target") || exit 1
+    [ "${metadata%% *}" = "$UID" ] || die "editor changed note ownership: $target"
+    chmod 600 "$target" || die "cannot restore private note permissions: $target"
+    validate_note "$target"
+    return "$result"
+}
+create_note() {
+    local title=$1 slug filename stamp
+    [ -n "$title" ] || die 'new requires a nonempty title'
+    case "$title" in *$'\n'*|*$'\r'*) die 'title must fit on one line';; esac
+    require_command nvim
+    ensure_notes_dir
+    slug=$(printf '%s' "$title" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs 'a-z0-9' '-' | cut -c 1-48)
+    slug=${slug#-}; slug=${slug%-}
+    [ -n "$slug" ] || slug=note
+    stamp=$(date -u '+%Y%m%dT%H%M%SZ') || exit 1
+    filename=$(mktemp "$notes_dir/$stamp-$slug.XXXXXXXX") || die 'cannot allocate a note'
+    # Reserve the final name without overwriting an existing note.
+    if ! ln -- "$filename" "$filename.md"; then
+        rm -f -- "$filename"
+        die 'cannot allocate Markdown filename'
+    fi
+    rm -f -- "$filename" || exit 1
+    filename=$filename.md
+    printf '# %s\n\n' "$title" > "$filename" || die "cannot write note: $filename"
+    edit_note "$filename" 1
+}
+sanitize() {
+    LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
+}
+label() {
+    printf '%s' "$1" | sanitize | tr '\t\r\n' '   '
+}
+collect_notes() {
+    note_paths=()
+    local path
+    while IFS= read -r -d '' path; do
+        validate_note "$path"
+        note_paths+=("$path")
+    done < <(find "$notes_dir" -name .git -prune -o -type f -name '*.md' -print0)
+}
+picker() (
+    unset FZF_DEFAULT_OPTS FZF_DEFAULT_OPTS_FILE FZF_DEFAULT_COMMAND
+    export SHELL="$BASH"
+    local color=--color=16
+    [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ] || color=--no-color
+    fzf --height=80% --layout=reverse --border "$color" "$@"
+)
+cleanup_map() {
+    [ -z "${picker_map:-}" ] || rm -f -- "$picker_map"
+}
+select_note() {
+    local i selected result=0 id preview quoted_bash quoted_app quoted_map
+    if [ "${#result_paths[@]}" = 0 ]; then info 'No matches.'; return 0; fi
+    require_command fzf
+    picker_map=$(mktemp "${TMPDIR:-/tmp}/shellnote-picker.XXXXXXXX") || die 'cannot create picker metadata'
+    trap cleanup_map EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    for ((i=0; i<${#result_paths[@]}; i++)); do
+        printf '%s\0%s\0' "${result_paths[i]}" "${result_lines[i]}" >> "$picker_map" || exit 1
+    done
+    printf -v quoted_bash '%q' "$BASH"
+    printf -v quoted_app '%q' "$app_path"
+    printf -v quoted_map '%q' "$picker_map"
+    preview="$quoted_bash $quoted_app __preview $quoted_map {1}"
+    selected=$(
+        for ((i=0; i<${#result_paths[@]}; i++)); do
+            printf '%s\t%s\n' "$((i+1))" "${result_labels[i]}"
+        done | picker --delimiter=$'\t' --with-nth=2.. --prompt='notes> ' \
+            --preview "$preview" --preview-window=right:55%:wrap
+    ) || result=$?
+    cleanup_map; picker_map=''
+    case "$result" in 1|130) return 0;; 0) ;; *) die "picker failed (exit $result)";; esac
+    id=${selected%%$'\t'*}
+    [[ "$id" =~ ^[1-9][0-9]*$ ]] && [ "${#id}" -lt 10 ] || die 'invalid picker selection'
+    [ "$id" -le "${#result_paths[@]}" ] || die 'invalid picker selection'
+    i=$((id-1))
+    edit_note "${result_paths[i]}" "${result_lines[i]}"
+}
+preview_note() {
+    local map=$1 id=$2 path line i=0
+    [[ "$id" =~ ^[1-9][0-9]*$ ]] && [ "${#id}" -lt 10 ] || die 'invalid preview selection'
+    [ -f "$map" ] && [ ! -L "$map" ] || die 'invalid preview metadata'
+    check_private "$map" 600
+    while IFS= read -r -d '' path && IFS= read -r -d '' line; do
+        i=$((i+1))
+        if [ "$i" = "$id" ]; then
+            validate_note "$path"
+            sanitize < "$path"
+            return
+        fi
+    done < "$map"
+    die 'preview selection not found'
+}
+browse_notes() {
+    ensure_notes_dir
+    collect_notes
+    if [ "${#note_paths[@]}" = 0 ]; then info 'No notes yet. Create one: shellnote new "Title"'; return; fi
+    result_paths=(); result_lines=(); result_labels=()
+    local path
+    for path in "${note_paths[@]}"; do
+        result_paths+=("$path"); result_lines+=(1)
+        result_labels+=("$(label "${path#"$notes_dir"/}")")
+    done
+    select_note
+}
+find_notes() {
+    local query=$1 path matches result match line content
+    [ -n "$query" ] || die 'find requires nonempty text'
+    require_command rg
+    ensure_notes_dir
+    collect_notes
+    result_paths=(); result_lines=(); result_labels=()
+    for path in "${note_paths[@]}"; do
+        result=0
+        matches=$(rg --no-config --no-ignore --text --color=never --no-heading --no-filename -n -F -- "$query" "$path") || result=$?
+        case "$result" in 1) continue;; 0) ;; *) die "search failed: $path";; esac
+        while IFS= read -r match; do
+            line=${match%%:*}; content=${match#*:}
+            result_paths+=("$path"); result_lines+=("$line")
+            result_labels+=("$(label "${path#"$notes_dir"/}:$line: $content")")
+        done <<< "$matches"
+    done
+    select_note
+}
+tag_notes() {
+    local tag=$1 path matches result token all_tags='' selected
+    require_command rg
+    ensure_notes_dir
+    collect_notes
+    if [ -z "$tag" ]; then
+        for path in "${note_paths[@]}"; do
+            result=0
+            matches=$(rg --no-config --no-ignore --text --color=never --no-filename -o -- '(^|[[:space:]])#[A-Za-z0-9][A-Za-z0-9_-]*' "$path") || result=$?
+            case "$result" in 1) continue;; 0) ;; *) die "tag search failed: $path";; esac
+            while IFS= read -r token; do all_tags="$all_tags#${token##*#}"$'\n'; done <<< "$matches"
+        done
+        if [ -z "$all_tags" ]; then info 'No tags found.'; return; fi
+        require_command fzf
+        result=0
+        selected=$(printf '%s' "$all_tags" | LC_ALL=C sort -u | picker --prompt='tags> ') || result=$?
+        case "$result" in 1|130) return 0;; 0) ;; *) die "tag picker failed (exit $result)";; esac
+        tag=$selected
+    fi
+    tag=${tag#\#}
+    [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die 'invalid tag: use letters, digits, underscores, or hyphens'
+    result_paths=(); result_lines=(); result_labels=()
+    for path in "${note_paths[@]}"; do
+        result=0
+        rg --no-config --no-ignore --text --color=never -q -- "(^|[[:space:]])#$tag([^A-Za-z0-9_-]|$)" "$path" || result=$?
+        case "$result" in 1) continue;; 0) ;; *) die "tag search failed: $path";; esac
+        result_paths+=("$path"); result_lines+=(1)
+        result_labels+=("$(label "${path#"$notes_dir"/}")")
+    done
+    select_note
+}
+notes_git() (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_CEILING_DIRECTORIES \
+        GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+        GIT_NAMESPACE GIT_SHALLOW_FILE GIT_REPLACE_REF_BASE GIT_GRAFT_FILE \
+        GIT_ICASE_PATHSPECS GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS
+    git -C "$notes_dir" "$@"
+)
+require_notes_repository() {
+    require_command git
+    [ -d "$notes_dir/.git" ] && [ ! -L "$notes_dir/.git" ] || die 'notes must have their own repository: shellnote init --git'
+    check_private "$notes_dir/.git" 700
+    local root
+    root=$(notes_git rev-parse --show-toplevel 2>/dev/null) || die 'invalid notes repository'
+    [ "$root" = "$notes_dir" ] || die 'Git repository root must be the notes directory'
+}
+init_git() {
+    require_command git
+    if [ -e "$notes_dir/.git" ] || [ -L "$notes_dir/.git" ]; then
+        require_notes_repository
+    else
+        notes_git init -q || die 'could not initialize notes repository'
+        require_notes_repository
+    fi
+    if [ ! -e "$notes_dir/.gitignore" ] && [ ! -L "$notes_dir/.gitignore" ]; then
+        (set -o noclobber; printf '%s\n' '*.swp' '*.swo' '*~' '*.un~' '.DS_Store' > "$notes_dir/.gitignore") || die 'cannot create ignore file'
+        notes_git config --local shellnote.ownsIgnore true || die 'cannot record ignore file ownership'
+    fi
+    info "Notes repository ready: $notes_dir"
+}
+commit_notes() {
+    local message=$1 path owns_ignore=false index_result=0
+    [ -n "$message" ] || die 'commit requires a nonempty message'
+    ensure_notes_dir
+    require_notes_repository
+    owns_ignore=$(notes_git config --local --bool shellnote.ownsIgnore 2>/dev/null) || owns_ignore=false
+    notes_git diff --cached --quiet -- || index_result=$?
+    [ "$index_result" -le 1 ] || die 'cannot inspect the Git index'
+    while IFS= read -r -d '' path; do
+        case "$path" in
+            *.md)
+                if [ -e "$notes_dir/$path" ] || [ -L "$notes_dir/$path" ]; then
+                    validate_note "$notes_dir/$path"
+                fi;;
+            .gitignore) [ "$owns_ignore" = true ] || die 'unrelated staged file: .gitignore';;
+            *) die "unrelated staged file: $path";;
+        esac
+    done < <(notes_git diff --cached --no-renames --name-only -z --)
+    collect_notes
+    local stage_paths=()
+    for path in "${note_paths[@]}"; do stage_paths+=(":(literal)${path#"$notes_dir"/}"); done
+    while IFS= read -r -d '' path; do
+        case "$path" in
+            *.md)
+                if [ -e "$notes_dir/$path" ] || [ -L "$notes_dir/$path" ]; then
+                    validate_note "$notes_dir/$path"
+                fi
+                stage_paths+=(":(literal)$path");;
+        esac
+    done < <(notes_git ls-files --deleted -z --)
+    if [ "$owns_ignore" = true ]; then
+        [ -f "$notes_dir/.gitignore" ] && [ ! -L "$notes_dir/.gitignore" ] || die 'app-created .gitignore is missing or unsafe'
+        check_private "$notes_dir/.gitignore" 600
+        stage_paths+=(':(literal).gitignore')
+    fi
+    if [ "${#stage_paths[@]}" -gt 0 ]; then
+        notes_git add -- "${stage_paths[@]}" || die 'could not stage notes'
+    fi
+    index_result=0
+    notes_git diff --cached --quiet -- || index_result=$?
+    case "$index_result" in 0) info 'No note changes to commit.'; return 0;; 1) ;; *) die 'cannot inspect staged notes';; esac
+    notes_git commit -m "$message"
+}
+push_notes() {
+    ensure_notes_dir
+    require_notes_repository
+    notes_git push
+}
+main() {
+    local command=${1:-browse}
+    [ "$#" = 0 ] || shift
+    case "$command" in
+        help|--help|-h) [ "$#" = 0 ] || die 'help takes no arguments'; usage;;
+        init)
+            [ "$#" = 0 ] || { [ "$#" = 1 ] && [ "$1" = --git ]; } || die 'usage: shellnote init [--git]'
+            [ "$#" = 0 ] || require_command git
+            ensure_notes_dir
+            if [ "$#" = 1 ]; then init_git; else info "Storage ready: $notes_dir"; fi;;
+        new) [ "$#" = 1 ] || die 'usage: shellnote new "Title"'; create_note "$1";;
+        browse) [ "$#" = 0 ] || die 'shellnote takes no arguments without a command'; browse_notes;;
+        find) [ "$#" = 1 ] || die 'usage: shellnote find "Text"'; find_notes "$1";;
+        tags) [ "$#" -le 1 ] || die 'usage: shellnote tags [tag]'; tag_notes "${1:-}";;
+        commit) [ "$#" = 1 ] || die 'usage: shellnote commit "Message"'; commit_notes "$1";;
+        push) [ "$#" = 0 ] || die 'usage: shellnote push'; push_notes;;
+        __preview) [ "$#" = 2 ] || die 'invalid preview arguments'; ensure_notes_dir; preview_note "$1" "$2";;
+        *) die "unknown command: $command (see shellnote help)";;
+    esac
+}
+app_path=${BASH_SOURCE[0]}
+case "$app_path" in /*) ;; *) app_path="$PWD/$app_path";; esac
+main "$@"

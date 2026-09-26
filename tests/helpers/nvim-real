@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec "$TEST_REAL_NVIM" --headless -u "$TEST_NVIM_CONFIG" --noplugin "$@"

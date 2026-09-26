@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -eu
+printf '%s\0' "$@" > "$TEST_EDITOR_ARGS"
+last=''
+for arg in "$@"; do last=$arg; done
+if [ -n "${TEST_EDITOR_REPLACE_PARENT:-}" ]; then
+    parent=${last%/*}
+    mv "$parent" "$parent.saved"
+    ln -s "$TEST_EDITOR_REPLACE_PARENT" "$parent"
+fi
+if [ "${TEST_EDITOR_CHMOD:-0}" = 1 ]; then chmod 644 "$last"; fi
+exit "${TEST_EDITOR_STATUS:-0}"
