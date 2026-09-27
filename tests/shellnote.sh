@@ -184,6 +184,9 @@ test_list_notes() {
     assert_equal $'First note\tfirst.md' "$(cat "$case_dir/stdout")"
     run list --tag absent; success
     assert_equal '' "$(cat "$case_dir/stdout")"
+    run list --tag wrk; success
+    assert_equal '' "$(cat "$case_dir/stdout")"
+    assert_equal 'No notes tagged #wrk. Similar tags: #work' "$(cat "$case_dir/stderr")"
 }
 test_browse_recent_titles() {
     fixture_note a.md '# Older case'
@@ -396,6 +399,12 @@ test_tags_exact() {
     assert_equal 1 "$(wc -l < "$TEST_PICKER_ROWS" | tr -d ' ')"
     run tags code; success; editor_args
     assert_equal "$NOTES_DIR/work.md" "$editor_last"
+    assert_equal +4 "${editor_values[${#editor_values[@]}-3]}"
+    contains "$TEST_PICKER_ARGS" '\+\{2\}-/2'
+    run tags wrok; success
+    assert_equal 'No notes tagged #wrok. Similar tags: #Work #work' "$(cat "$case_dir/stdout")"
+    run tags zzz; success
+    assert_equal 'No notes tagged #zzz.' "$(cat "$case_dir/stdout")"
     run tags; success
     contains "$TEST_PICKER_ROWS" '#Work'
     if rg -q '#Heading' "$TEST_PICKER_ROWS"; then fail 'heading treated as tag'; fi

@@ -74,7 +74,7 @@ Input redirected from a file counts as piped.
 | `shellnote find connection refused` | Search literal text and jump to the selected line. |
 | `shellnote find -p connection refused` | Print matching note paths, lines, and text. |
 | `shellnote tags` | Pick a tag, then a matching note. |
-| `shellnote tags work` | Find the exact tag `#work`. |
+| `shellnote tags work` | Find the exact tag `#work` and open the note at its first `#work` line. |
 | `shellnote help` | Show command help. `shellnote COMMAND -h` shows one command's usage. |
 
 `edit` and `show` match words against titles and paths, ignoring case.
@@ -95,6 +95,7 @@ Tags are case-sensitive and start at a line boundary or after whitespace.
 They contain ASCII letters, digits, underscores, and hyphens, starting with a letter or digit.
 `#work` does not match `#workshop` or `#Work`.
 Markdown headings are not tags, but tags inside code fences count.
+When no note has the tag, `tags` and `list -t` suggest similar tags, such as `#work` for `wrok` or `#Work` for `work`.
 
 ## Appearance and configuration
 
