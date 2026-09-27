@@ -400,11 +400,12 @@ test_tags_exact() {
     run tags code; success; editor_args
     assert_equal "$NOTES_DIR/work.md" "$editor_last"
     assert_equal +4 "${editor_values[${#editor_values[@]}-3]}"
+    tr '\0' '\n' < "$TEST_PICKER_ARGS" | rg -qx -- '--border-label= shellnote · tags ' || fail 'wrong tags frame title'
     contains "$TEST_PICKER_ARGS" '\+\{2\}-/2'
     rm -f "$TEST_PICKER_ROWS" "$TEST_EDITOR_ARGS"
     export TEST_PICKER_MATCH=work
     run tags wrok; success; editor_args
-    assert_equal $'#Work\n#work' "$(head -n 2 "$TEST_PICKER_ROWS")"
+    assert_equal $'#work\n#Work' "$(head -n 2 "$TEST_PICKER_ROWS")"
     assert_equal "$NOTES_DIR/work.md" "$editor_last"
     assert_equal +2 "${editor_values[${#editor_values[@]}-3]}"
     unset TEST_PICKER_MATCH
