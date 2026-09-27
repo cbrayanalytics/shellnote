@@ -46,6 +46,9 @@ usage() {
     printf '%s\n' 'Dependencies: Bash 3.2+, Neovim (nvim), fzf, ripgrep (rg); Git is optional.'
 }
 stat_style=''
+# A tag is "#" plus tag_word; a heading is 1 to 6 "#" and a space. rg, Bash, and awk all read these.
+tag_word='[A-Za-z0-9][A-Za-z0-9_-]*'
+heading_pattern='^#{1,6}[[:space:]]'
 # Sets metadata to "uid mode"; the stat flavor is probed once because the failed probe costs a process per call.
 file_metadata() {
     if [ -z "$stat_style" ]; then
@@ -127,12 +130,17 @@ cleanup_temp() {
     [ -z "${picker_map:-}" ] || rm -f -- "$picker_map"
     [ -z "${capture_file:-}" ] || rm -f -- "$capture_file"
 }
-# Copies stdin to a private file first so empty or failed input changes no note.
-capture_stdin() {
-    capture_file=$(mktemp "$notes_dir/.capture.XXXXXXXX") || die 'cannot capture input'
+# Removes temporary files on exit, including after Ctrl-C or a kill.
+trap_cleanup() {
     trap cleanup_temp EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+}
+lowercase() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
+# Copies stdin to a private file first so empty or failed input changes no note.
+capture_stdin() {
+    capture_file=$(mktemp "$notes_dir/.capture.XXXXXXXX") || die 'cannot capture input'
+    trap_cleanup
     cat > "$capture_file" || die 'cannot read input'
     [ -s "$capture_file" ] || die 'no input to add'
 }
@@ -160,7 +168,7 @@ create_note() {
     [ "$capture" = true ] || require_command nvim
     ensure_notes_dir
     [ "$capture" = false ] || capture_stdin
-    slug=$(printf '%s' "$title" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs 'a-z0-9' '-' | cut -c 1-48)
+    slug=$(lowercase "$title" | LC_ALL=C tr -cs 'a-z0-9' '-' | cut -c 1-48)
     slug=${slug#-}; slug=${slug%-}
     [ -n "$slug" ] || slug=note
     stamp=$(date -u '+%Y%m%dT%H%M%SZ') || exit 1
@@ -184,8 +192,10 @@ create_note() {
 }
 # Consumes leading options that appear in the usage text and sets option_count and opt_*.
 # Unknown options fail so a typo is never saved as a title or searched as text.
+# The usage text is kept for usage_error.
 parse_options() {
     local usage=$1
+    command_usage=$usage
     shift
     option_count=0; opt_git=false; opt_print=false; opt_tag=''
     while [ "$#" -gt 0 ]; do
@@ -196,7 +206,7 @@ parse_options() {
             -p|--print) [[ "$usage" == *--print* ]] || unknown_option "$1" "$usage"; opt_print=true;;
             -t|--tag)
                 [[ "$usage" == *--tag* ]] || unknown_option "$1" "$usage"
-                [ "$#" -ge 2 ] || die "usage: shellnote $usage"
+                [ "$#" -ge 2 ] || usage_error
                 opt_tag=$2; shift; option_count=$((option_count + 1));;
             -?*) unknown_option "$1" "$usage";;
             *) return 0;;
@@ -207,6 +217,7 @@ parse_options() {
 unknown_option() {
     die "unknown option: $1 (usage: shellnote $2; put -- before text starting with -)"
 }
+usage_error() { die "usage: shellnote $command_usage"; }
 sanitize() {
     LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
 }
@@ -217,6 +228,10 @@ label() {
     REPLY=${REPLY//[[:cntrl:]]/}
 }
 rel_label() { label "${1#"$notes_dir"/}"; }
+load_notes() {
+    ensure_notes_dir
+    collect_notes
+}
 collect_notes() {
     note_paths=()
     local path
@@ -225,13 +240,14 @@ collect_notes() {
         note_paths+=("$path")
     done < <(find "$notes_dir" -name .git -prune -o -type f -name '*.md' -print0 | LC_ALL=C sort -z)
 }
+# Ignores user config and ignore files so search scope never depends on the environment.
+rg_plain() { rg --no-config --no-ignore --text --color=never "$@"; }
 # Searches note_paths in bounded batches so large collections stay under ARG_MAX.
 rg_notes() {
     local i status=1 result
     for ((i=0; i<${#note_paths[@]}; i+=256)); do
         result=0
-        rg --no-config --no-ignore --text --color=never --sort path --with-filename --null --no-heading \
-            "$@" -- "${note_paths[@]:i:256}" || result=$?
+        rg_plain --sort path --with-filename --null --no-heading "$@" -- "${note_paths[@]:i:256}" || result=$?
         case "$result" in 0) status=0;; 1) ;; *) return 2;; esac
     done
     return "$status"
@@ -250,7 +266,7 @@ search_notes() {
 }
 normalize_tag() {
     REPLY=${1#\#}
-    [[ "$REPLY" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die 'invalid tag: use letters, digits, underscores, or hyphens'
+    [[ "$REPLY" =~ ^$tag_word$ ]] || die 'invalid tag: use letters, digits, underscores, or hyphens'
 }
 # Narrows note_paths to notes containing the exact tag; tag_lines holds each note's first tag line.
 # Reads the records collect_tags left behind, so trying another tag never searches again.
@@ -265,7 +281,7 @@ match_tag() {
 # Sets REPLY to up to five known tags close to a missing one, one "#tag" per line.
 # Case differences, substrings, and small typos all count as close.
 similar_tags() {
-    REPLY=$(printf '%s' "$all_tags" | tr -d '#' | LC_ALL=C sort -u | awk -v want="$1" '
+    REPLY=$(unique_tags | tr -d '#' | awk -v want="$1" '
         # Edit distance where swapping two neighbouring letters counts as one typo.
         function distance(a, b,    i, j, la, lb, cost, d, best) {
             la = length(a); lb = length(b)
@@ -293,6 +309,12 @@ similar_tags() {
 }
 reset_results() {
     result_paths=(); result_lines=(); result_labels=(); result_titles=(); result_details=(); result_contents=()
+}
+# Replaces the results with every note in note_paths.
+results_from_notes() {
+    local i
+    reset_results
+    for ((i=0; i<${#note_paths[@]}; i++)); do add_note_result "${note_paths[i]}"; done
 }
 add_note_result() {
     local rel
@@ -323,6 +345,11 @@ read_mtimes() {
     done
     [ "${#mtimes[@]}" = "$#" ] || die 'cannot read modification times'
 }
+# Fills mtimes and sets now, the pair format_age needs.
+read_ages() {
+    read_mtimes "$@"
+    now=$(date +%s) || die 'cannot read the clock'
+}
 # Sets REPLY to a compact age such as now, 5m, 3h, 2d, 6w, 4mo, or 2y, measured from $now.
 format_age() {
     local s=$((now - $1))
@@ -348,6 +375,8 @@ sort_recent() {
     done < <(for ((i=0; i<${#mtimes[@]}; i++)); do printf '%s %s\n' "${mtimes[i]}" "$i"; done | sort -k1,1nr -k2,2n)
     note_paths=("${sorted[@]}")
 }
+# Picker and preview ids are 1-based row numbers; the length cap keeps arithmetic in range.
+valid_id() { [[ "$1" =~ ^[1-9][0-9]*$ ]] && [ "${#1}" -lt 10 ]; }
 # The first argument names the view in the frame title, as in "shellnote · tags".
 # Colors use the terminal's own 16-color palette so the picker follows light and dark themes.
 picker() (
@@ -370,9 +399,7 @@ select_note() {
     if [ "${#result_paths[@]}" = 0 ]; then info 'No matches.'; return 0; fi
     require_command fzf
     picker_map=$(mktemp "${TMPDIR:-/tmp}/shellnote-picker.XXXXXXXX") || die 'cannot create picker metadata'
-    trap cleanup_temp EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap_cleanup
     for ((i=0; i<${#result_paths[@]}; i++)); do
         printf '%s\0%s\0' "${result_paths[i]}" "${result_lines[i]}" >> "$picker_map" || exit 1
     done
@@ -397,8 +424,7 @@ select_note() {
         printf -v pad '%*s' "$pad" ''
         padded+=("${result_titles[i]}$pad")
     done
-    read_mtimes "${result_paths[@]}"
-    now=$(date +%s) || die 'cannot read the clock'
+    read_ages "${result_paths[@]}"
     case "$action" in show) verb=print;; add) verb=append;; *) verb=edit;; esac
     selected=$(
         for ((i=0; i<${#result_paths[@]}; i++)); do
@@ -417,10 +443,8 @@ select_note() {
     rm -f -- "$picker_map"; picker_map=''
     case "$result" in 1|130) return 0;; 0) ;; *) die "picker failed (exit $result)";; esac
     id=${selected%%$'\t'*}
-    [[ "$id" =~ ^[1-9][0-9]*$ ]] && [ "${#id}" -lt 10 ] || die 'invalid picker selection'
-    [ "$id" -le "${#result_paths[@]}" ] || die 'invalid picker selection'
-    i=$((id-1))
-    open_result "$action" "$i"
+    valid_id "$id" && [ "$id" -le "${#result_paths[@]}" ] || die 'invalid picker selection'
+    open_result "$action" $((id - 1))
 }
 open_result() {
     case "$1" in
@@ -431,8 +455,7 @@ open_result() {
 }
 # Acts on the most recently modified note; editing starts at its last line to resume work.
 open_latest() {
-    ensure_notes_dir
-    collect_notes
+    load_notes
     [ "${#note_paths[@]}" -gt 0 ] || die 'no notes yet'
     sort_recent
     reset_results
@@ -442,7 +465,7 @@ open_latest() {
 }
 preview_note() {
     local map=$1 id=$2 mark=${3:-} path line i=0
-    [[ "$id" =~ ^[1-9][0-9]*$ ]] && [ "${#id}" -lt 10 ] || die 'invalid preview selection'
+    valid_id "$id" || die 'invalid preview selection'
     [ -f "$map" ] && [ ! -L "$map" ] || die 'invalid preview metadata'
     check_private "$map" 600
     while IFS= read -r -d '' path && IFS= read -r -d '' line; do
@@ -452,11 +475,11 @@ preview_note() {
             if use_color; then
                 [ "$mark" = mark ] && [[ "$line" =~ ^[0-9]+$ ]] || line=0
                 # Colors are added after control characters are stripped, so notes cannot inject their own.
-                sanitize < "$path" | awk -v n="$line" '
+                sanitize < "$path" | awk -v n="$line" -v tag_word="$tag_word" '
                     # Colors #tags that start a line or follow whitespace, matching the tag search.
                     function tags(s,    out, tok, first) {
                         out = ""; first = 1
-                        while (match(s, /(^|[ \t])#[A-Za-z0-9][A-Za-z0-9_-]*/)) {
+                        while (match(s, "(^|[ \t])#" tag_word)) {
                             tok = substr(s, RSTART, RLENGTH)
                             out = out substr(s, 1, RSTART - 1)
                             s = substr(s, RSTART + RLENGTH)
@@ -480,13 +503,10 @@ preview_note() {
     die 'preview selection not found'
 }
 browse_notes() {
-    local i
-    ensure_notes_dir
-    collect_notes
+    load_notes
     if [ "${#note_paths[@]}" = 0 ]; then info 'No notes yet. Create one: shellnote new Title'; return; fi
     sort_recent
-    reset_results
-    for ((i=0; i<${#note_paths[@]}; i++)); do add_note_result "${note_paths[i]}"; done
+    results_from_notes
     select_note
 }
 # Sets REPLY to the note's "# " heading, falling back to its relative path with status 1.
@@ -501,8 +521,7 @@ note_title() {
 list_notes() {
     local tag=${1:-} i title_width=5 path_width=4 title_rule path_rule
     local -a list_paths=() list_titles=()
-    ensure_notes_dir
-    collect_notes
+    load_notes
     if [ -n "$tag" ]; then
         require_command rg
         normalize_tag "$tag"
@@ -526,8 +545,7 @@ list_notes() {
         [ "${#REPLY}" -le "$path_width" ] || path_width=${#REPLY}
     done
     if [ -t 1 ] && use_color; then
-        read_mtimes "${note_paths[@]}"
-        now=$(date +%s) || die 'cannot read the clock'
+        read_ages "${note_paths[@]}"
         printf -v title_rule '%*s' "$title_width" ''
         printf -v path_rule '%*s' "$path_width" ''
         printf '\033[1;32m%4s  %-*s\033[0m  \033[2m%s\033[0m\n' AGE "$title_width" TITLE PATH
@@ -547,8 +565,7 @@ find_notes() {
     local query=$1 print_matches=${2:-false} i line content title='' previous=''
     [ -n "$query" ] || die 'find requires nonempty text'
     require_command rg
-    ensure_notes_dir
-    collect_notes
+    load_notes
     search_notes 'search failed' -n -F --smart-case -e "$query"
     reset_results
     for ((i=0; i<${#rg_paths[@]}; i++)); do
@@ -573,7 +590,7 @@ find_notes() {
 load_headings() {
     local records result=0 record
     heading_lines=(); heading_texts=()
-    records=$(rg --no-config --no-ignore --text --color=never --no-filename -n -e '^#{1,6}[[:space:]]' -- "$1") || result=$?
+    records=$(rg_plain --no-filename -n -e "$heading_pattern" -- "$1") || result=$?
     case "$result" in 0) ;; 1) return 0;; *) die "heading search failed: $1";; esac
     while IFS= read -r record; do
         heading_lines+=("${record%%:*}"); heading_texts+=("${record#*:}")
@@ -588,8 +605,8 @@ focused_preview() {
         prefix=${text%%"$query"*}
         # Smart-case can match with different case, so retry the offset on lowercased copies.
         if [ "$prefix" = "$text" ]; then
-            prefix=$(printf '%s' "$text" | LC_ALL=C tr '[:upper:]' '[:lower:]')
-            prefix=${prefix%%"$(printf '%s' "$query" | LC_ALL=C tr '[:upper:]' '[:lower:]')"*}
+            prefix=$(lowercase "$text")
+            prefix=${prefix%%"$(lowercase "$query")"*}
         fi
         start=$((${#prefix} - width / 3))
         [ "$start" -ge 0 ] || start=0
@@ -629,7 +646,7 @@ print_search_results() {
                 printf '\n%s\n' "$REPLY"
                 previous_heading=$heading
             fi
-            [[ "${result_contents[i]}" =~ ^#{1,6}[[:space:]] ]] && continue
+            [[ "${result_contents[i]}" =~ $heading_pattern ]] && continue
             label "${result_contents[i]}"
             focused_preview "$REPLY" "$query" "$preview_width"
             printf '  %4s  %s\n' "${result_lines[i]}" "$REPLY"
@@ -647,8 +664,7 @@ print_search_results() {
 open_match() {
     local action=$1 i path rel haystack term matched exact
     shift
-    ensure_notes_dir
-    collect_notes
+    load_notes
     exact="$notes_dir/$*"
     reset_results
     for ((i=0; i<${#note_paths[@]}; i++)); do
@@ -671,11 +687,13 @@ open_match() {
         *) select_note "$action";;
     esac
 }
+# Prints each collected tag once, alphabetically with capitals ignored so #Work sits by #work.
+unique_tags() { printf '%s' "$all_tags" | LC_ALL=C sort -u | LC_ALL=C sort -s -f; }
 # Sets all_tags to every tag occurrence in note_paths, one "#tag" per line.
 # The "path, line:#tag" records stay in rg_paths and rg_rest for match_tag.
 collect_tags() {
     local i
-    search_notes 'tag search failed' -n -o -e '(^|[[:space:]])#[A-Za-z0-9][A-Za-z0-9_-]*'
+    search_notes 'tag search failed' -n -o -e "(^|[[:space:]])#$tag_word"
     all_tags=''
     for ((i=0; i<${#rg_rest[@]}; i++)); do all_tags="$all_tags#${rg_rest[i]##*#}"$'\n'; done
 }
@@ -684,13 +702,12 @@ complete_words() {
     local i
     resolve_notes_dir
     [ -d "$notes_dir" ] || return 0
-    ensure_notes_dir
-    collect_notes
+    load_notes
     case "$1" in
         tags)
             require_command rg
             collect_tags
-            printf '%s' "$all_tags" | tr -d '#' | LC_ALL=C sort -u;;
+            unique_tags | tr -d '#';;
         titles)
             sort_recent
             for ((i=0; i<${#note_paths[@]}; i++)); do note_title "${note_paths[i]}"; printf '%s\n' "$REPLY"; done;;
@@ -710,12 +727,11 @@ tag_notes() {
     local tag=$1 i
     require_command rg
     if [ -n "$tag" ]; then normalize_tag "$tag"; tag=$REPLY; fi
-    ensure_notes_dir
-    collect_notes
+    load_notes
     collect_tags
     if [ -z "$tag" ]; then
         if [ -z "$all_tags" ]; then info 'No tags found.'; return; fi
-        pick_tag "$(printf '%s' "$all_tags" | LC_ALL=C sort -u | LC_ALL=C sort -s -f)" 'tags> ' 'Enter choose · Esc cancel' || return 0
+        pick_tag "$(unique_tags)" 'tags> ' 'Enter choose · Esc cancel' || return 0
         tag=$REPLY
     fi
     match_tag "$tag"
@@ -730,9 +746,8 @@ tag_notes() {
     local -a tagged_paths=("${note_paths[@]}") tagged_lines=("${tag_lines[@]}")
     local j
     sort_recent
-    reset_results
+    results_from_notes
     for ((i=0; i<${#note_paths[@]}; i++)); do
-        add_note_result "${note_paths[i]}"
         for ((j=0; j<${#tagged_paths[@]}; j++)); do
             [ "${tagged_paths[j]}" != "${note_paths[i]}" ] || { result_lines[i]=${tagged_lines[j]}; break; }
         done
@@ -756,13 +771,10 @@ require_notes_repository() {
     [ "$root" = "$notes_dir" ] || die 'Git repository root must be the notes directory'
 }
 init_git() {
-    require_command git
-    if [ -e "$notes_dir/.git" ] || [ -L "$notes_dir/.git" ]; then
-        require_notes_repository
-    else
+    if [ ! -e "$notes_dir/.git" ] && [ ! -L "$notes_dir/.git" ]; then
         notes_git init -q || die 'could not initialize notes repository'
-        require_notes_repository
     fi
+    require_notes_repository
     if [ ! -e "$notes_dir/.gitignore" ] && [ ! -L "$notes_dir/.gitignore" ]; then
         (set -o noclobber; printf '%s\n' '*.swp' '*.swo' '*~' '*.un~' '.DS_Store' > "$notes_dir/.gitignore") || die 'cannot create ignore file'
         notes_git config --local shellnote.ownsIgnore true || die 'cannot record ignore file ownership'
@@ -828,13 +840,13 @@ main() {
         help|--help|-h) [ "$#" = 0 ] || die 'help takes no arguments'; usage;;
         init)
             parse_options 'init [--git]' "$@"; shift "$option_count"
-            [ "$#" = 0 ] || die 'usage: shellnote init [--git]'
+            [ "$#" = 0 ] || usage_error
             [ "$opt_git" = false ] || require_command git
             ensure_notes_dir
             if [ "$opt_git" = true ]; then init_git; else info "Storage ready: $notes_dir"; fi;;
         new)
             parse_options 'new TITLE...' "$@"; shift "$option_count"
-            [ "$#" -ge 1 ] || die 'usage: shellnote new TITLE...'
+            [ "$#" -ge 1 ] || usage_error
             if stdin_piped; then create_note "$*" true; else create_note "$*"; fi;;
         add)
             parse_options 'add [MATCH...]' "$@"; shift "$option_count"
@@ -844,7 +856,7 @@ main() {
             if [ "$#" = 0 ]; then open_latest add; else open_match add "$@"; fi;;
         last)
             parse_options 'last' "$@"; shift "$option_count"
-            [ "$#" = 0 ] || die 'usage: shellnote last'
+            [ "$#" = 0 ] || usage_error
             open_latest edit;;
         browse) [ "$#" = 0 ] || die 'shellnote takes no arguments without a command'; browse_notes;;
         edit)
@@ -852,28 +864,28 @@ main() {
             if [ "$#" = 0 ]; then browse_notes; else open_match edit "$@"; fi;;
         show)
             parse_options 'show MATCH...' "$@"; shift "$option_count"
-            [ "$#" -ge 1 ] || die 'usage: shellnote show MATCH...'
+            [ "$#" -ge 1 ] || usage_error
             open_match show "$@";;
         list)
             parse_options 'list [-t|--tag TAG]' "$@"; shift "$option_count"
-            [ "$#" = 0 ] || die 'usage: shellnote list [-t|--tag TAG]'
+            [ "$#" = 0 ] || usage_error
             list_notes "$opt_tag";;
         find)
             parse_options 'find [-p|--print] TEXT...' "$@"; shift "$option_count"
-            [ "$#" -ge 1 ] || die 'usage: shellnote find [-p|--print] TEXT...'
+            [ "$#" -ge 1 ] || usage_error
             # A picker cannot feed a pipe, so piped output always prints.
             [ ! -p /dev/stdout ] || opt_print=true
             find_notes "$*" "$opt_print";;
         tags)
             parse_options 'tags [TAG]' "$@"; shift "$option_count"
-            [ "$#" -le 1 ] || die 'usage: shellnote tags [TAG]'
+            [ "$#" -le 1 ] || usage_error
             tag_notes "${1:-}";;
         commit)
             parse_options 'commit [MESSAGE...]' "$@"; shift "$option_count"
             commit_notes "$(commit_message "$@")";;
         push)
             parse_options 'push' "$@"; shift "$option_count"
-            [ "$#" = 0 ] || die 'usage: shellnote push'
+            [ "$#" = 0 ] || usage_error
             push_notes;;
         sync)
             parse_options 'sync [MESSAGE...]' "$@"; shift "$option_count"

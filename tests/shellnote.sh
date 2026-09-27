@@ -36,10 +36,14 @@ success() { [ "$result" = 0 ] || { cat "$case_dir/stderr" >&2; fail "exit $resul
 failure() { [ "$result" != 0 ] || fail 'unexpected success'; }
 contains() { rg -q -- "$2" "$1" || fail "missing pattern: $2"; }
 notes() { find "$NOTES_DIR" -type f -name '*.md'; }
+picker_args() { tr '\0' '\n' < "$TEST_PICKER_ARGS"; }
+picker_row_count() { wc -l < "$TEST_PICKER_ROWS" | tr -d ' '; }
 editor_args() {
     editor_values=()
     while IFS= read -r -d '' arg; do editor_values+=("$arg"); done < "$TEST_EDITOR_ARGS"
     editor_last=${editor_values[${#editor_values[@]}-1]}
+    # The line argument sits two before the path, ahead of "--".
+    editor_line=${editor_values[${#editor_values[@]}-3]}
 }
 setup() {
     case_dir="$test_root/$1"
@@ -198,7 +202,7 @@ test_browse_recent_titles() {
     # Ages depend on today's date, so only their shape is checked.
     rows=$(sed -E $'s/\t *[0-9]+mo \t/\tAGE\t/' "$TEST_PICKER_ROWS")
     assert_equal $'1\t1\tAGE\tb.md       \t\n2\t1\tAGE\tOlder case \ta.md' "$rows"
-    picker_args=$(tr '\0' '\n' < "$TEST_PICKER_ARGS")
+    picker_args=$(picker_args)
     printf '%s\n' "$picker_args" | rg -qx -- '--exact' || fail 'fuzzy matching'
     printf '%s\n' "$picker_args" | rg -qx -- '--nth=2' || fail 'path is searchable'
     printf '%s\n' "$picker_args" | rg -qx -- '--header=Enter edit · Esc cancel · Ctrl-/ preview' || fail 'missing key hints'
@@ -209,7 +213,7 @@ test_find_picker_rows() {
     export NO_COLOR=1
     run find timed out; success
     assert_equal $'1\t3\t now \tCase 04512 nginx \t3: upstream timed out' "$(cat "$TEST_PICKER_ROWS")"
-    picker_args=$(tr '\0' '\n' < "$TEST_PICKER_ARGS")
+    picker_args=$(picker_args)
     printf '%s\n' "$picker_args" | rg -qx -- '--nth=2,3' || fail 'match text is not searchable'
     printf '%s\n' "$picker_args" | rg -q -- '\+\{2\}-/2' || fail 'preview does not scroll to the match'
     printf '%s\n' "$picker_args" | rg -q -- ' mark$' || fail 'preview does not mark the match'
@@ -233,7 +237,7 @@ test_literal_search() {
     run find '[v1].*'; success; editor_args
     assert_equal "$NOTES_DIR/one.md" "$editor_last"
     printf '%s\n' "${editor_values[@]}" | rg -q '^\+2$' || fail 'wrong matching line'
-    [ "$(wc -l < "$TEST_PICKER_ROWS" | tr -d ' ')" = 1 ] || fail 'regex search instead of literal'
+    [ "$(picker_row_count)" = 1 ] || fail 'regex search instead of literal'
 }
 test_print_search() {
     fixture_note one.md $'No match\nneedle here'
@@ -389,25 +393,25 @@ test_match_notes() {
     export TEST_PICKER_MATCH=04512
     run edit case; success; editor_args
     assert_equal "$NOTES_DIR/20260101T000000Z-case.a.md" "$editor_last"
-    assert_equal 2 "$(wc -l < "$TEST_PICKER_ROWS" | tr -d ' ')"
+    assert_equal 2 "$(picker_row_count)"
 }
 test_tags_exact() {
     fixture_note work.md $'# Heading\n#work, #work #work\n```\n#code\n```'
     fixture_note other.md '#workshop #Work email#work #work-extra'
     run tags work; success; editor_args
     assert_equal "$NOTES_DIR/work.md" "$editor_last"
-    assert_equal 1 "$(wc -l < "$TEST_PICKER_ROWS" | tr -d ' ')"
+    assert_equal 1 "$(picker_row_count)"
     run tags code; success; editor_args
     assert_equal "$NOTES_DIR/work.md" "$editor_last"
-    assert_equal +4 "${editor_values[${#editor_values[@]}-3]}"
-    tr '\0' '\n' < "$TEST_PICKER_ARGS" | rg -qx -- '--border-label= shellnote · tags ' || fail 'wrong tags frame title'
+    assert_equal +4 "$editor_line"
+    picker_args | rg -qx -- '--border-label= shellnote · tags ' || fail 'wrong tags frame title'
     contains "$TEST_PICKER_ARGS" '\+\{2\}-/2'
     rm -f "$TEST_PICKER_ROWS" "$TEST_EDITOR_ARGS"
     export TEST_PICKER_MATCH=work
     run tags wrok; success; editor_args
     assert_equal $'#work\n#Work' "$(head -n 2 "$TEST_PICKER_ROWS")"
     assert_equal "$NOTES_DIR/work.md" "$editor_last"
-    assert_equal +2 "${editor_values[${#editor_values[@]}-3]}"
+    assert_equal +2 "$editor_line"
     unset TEST_PICKER_MATCH
     rm -f "$TEST_EDITOR_ARGS"
     export TEST_PICKER_MODE=cancel
@@ -434,7 +438,7 @@ test_unusual_filenames() {
     fixture_note "$filename" 'needle'
     run find needle; success; editor_args
     assert_equal "$NOTES_DIR/$filename" "$editor_last"
-    assert_equal 1 "$(wc -l < "$TEST_PICKER_ROWS" | tr -d ' ')"
+    assert_equal 1 "$(picker_row_count)"
     [ ! -e "$NOTES_DIR/PWNED" ] || fail 'filename executed'
 }
 test_private_search_only() {
@@ -485,7 +489,7 @@ test_no_color() {
     if LC_ALL=C rg -q $'\033' "$case_dir/stdout"; then fail 'color on redirected output'; fi
     fixture_note one.md text
     run; success
-    tr '\0' '\n' < "$TEST_PICKER_ARGS" | rg -q -- '--no-color' || fail 'picker color enabled'
+    picker_args | rg -q -- '--no-color' || fail 'picker color enabled'
 }
 test_optional_emoji() {
     run init; success
