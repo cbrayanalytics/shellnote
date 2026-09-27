@@ -190,9 +190,35 @@ test_browse_recent_titles() {
     fixture_note b.md 'untitled'
     touch -t 202601010000 "$NOTES_DIR/a.md"
     touch -t 202602010000 "$NOTES_DIR/b.md"
-    export TEST_PICKER_MATCH=nothing
+    export TEST_PICKER_MATCH=nothing NO_COLOR=1
     run; success
-    assert_equal $'1\tb.md\n2\tOlder case  (a.md)' "$(cat "$TEST_PICKER_ROWS")"
+    # Ages depend on today's date, so only their shape is checked.
+    rows=$(sed -E $'s/\t *[0-9]+mo \t/\tAGE\t/' "$TEST_PICKER_ROWS")
+    assert_equal $'1\t1\tAGE\tb.md       \t\n2\t1\tAGE\tOlder case \ta.md' "$rows"
+    picker_args=$(tr '\0' '\n' < "$TEST_PICKER_ARGS")
+    printf '%s\n' "$picker_args" | rg -qx -- '--exact' || fail 'fuzzy matching'
+    printf '%s\n' "$picker_args" | rg -qx -- '--nth=2' || fail 'path is searchable'
+    printf '%s\n' "$picker_args" | rg -qx -- '--header=Enter edit · Esc cancel' || fail 'missing key hints'
+    printf '%s\n' "$picker_args" | rg -q -- '<100\(down' || fail 'preview does not adapt to narrow windows'
+}
+test_find_picker_rows() {
+    fixture_note a.md $'# Case 04512 nginx\n\nupstream timed out'
+    export NO_COLOR=1
+    run find timed out; success
+    assert_equal $'1\t3\t now \tCase 04512 nginx \t3: upstream timed out' "$(cat "$TEST_PICKER_ROWS")"
+    picker_args=$(tr '\0' '\n' < "$TEST_PICKER_ARGS")
+    printf '%s\n' "$picker_args" | rg -qx -- '--nth=2,3' || fail 'match text is not searchable'
+    printf '%s\n' "$picker_args" | rg -q -- '\+\{2\}-/2' || fail 'preview does not scroll to the match'
+    printf '%s\n' "$picker_args" | rg -q -- ' mark$' || fail 'preview does not mark the match'
+}
+test_list_age() {
+    fixture_note a.md '# Two days'
+    touch -t "$(date -v-2d +%Y%m%d%H%M 2>/dev/null || date -d '2 days ago' +%Y%m%d%H%M)" "$NOTES_DIR/a.md"
+    result=0
+    TERM=xterm script -q "$case_dir/tty-output" "$BASH" "$app" list < /dev/null > /dev/null 2>&1 || result=$?
+    success
+    contains "$case_dir/tty-output" 'AGE'
+    contains "$case_dir/tty-output" '  2d  .*Two days'
 }
 test_list_empty() {
     run list; success
@@ -413,6 +439,11 @@ test_sanitized_preview() {
     run __preview "$case_dir/map" 1; success
     contains "$case_dir/stdout" safe
     if LC_ALL=C rg -q $'[\033\007]' "$case_dir/stdout"; then fail 'terminal controls emitted'; fi
+    printf '%s\0%s\0' "$NOTES_DIR/one.md" 2 > "$case_dir/map"
+    TERM=xterm run __preview "$case_dir/map" 1 mark; success
+    assert_equal $'safe]52;c;payload\n\033[7mnext\033[0m' "$(cat "$case_dir/stdout")"
+    NO_COLOR=1 run __preview "$case_dir/map" 1 mark; success
+    if LC_ALL=C rg -q $'\033' "$case_dir/stdout"; then fail 'marked preview ignored NO_COLOR'; fi
 }
 test_environment_isolation() {
     fixture_note one.md 'needle'
@@ -614,7 +645,7 @@ test_git_icase_pathspec_environment() {
 
 storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_unquoted_words test_command_options test_invalid_arguments test_real_nvim_privacy test_missing_editor_creates_nothing'
 selected=${1:-all}
-search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_list_empty test_literal_search test_print_search test_piped_search_prints test_short_commands test_completion_words test_bash_completion test_zsh_completion_syntax test_smart_case_search test_print_search_tty test_show_note test_match_notes test_new_from_pipe test_add_from_pipe test_last_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
+search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_find_picker_rows test_list_age test_list_empty test_literal_search test_print_search test_piped_search_prints test_short_commands test_completion_words test_bash_completion test_zsh_completion_syntax test_smart_case_search test_print_search_tty test_show_note test_match_notes test_new_from_pipe test_add_from_pipe test_last_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
 git_tests='test_git_init test_commit_notes test_unrelated_staged_refused test_untracked_unrelated_ignored test_parent_repository_rejected test_git_environment_isolation test_push_local_remote test_sync_notes test_push_missing_upstream test_staged_symlink_refused test_unrelated_rename_refused test_git_literal_pathspec_environment test_git_icase_pathspec_environment'
 case "$selected" in storage) tests=$storage_tests;; search) tests=$search_tests;; git) tests=$git_tests;; all) tests="$storage_tests $search_tests $git_tests";; *) fail "unknown test group: $selected";; esac
 passed=0

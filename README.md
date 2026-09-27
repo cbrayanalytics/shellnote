@@ -79,13 +79,17 @@ Input redirected from a file counts as piped.
 
 `edit` and `show` match words against titles and paths, ignoring case.
 One match opens directly, and several matches open the picker.
-The browser, `list`, and match pickers show recently modified notes first.
+The browser, `list`, and match pickers show recently modified notes first, with an age such as `3h` or `2d`.
 `find` ignores case unless the text contains a capital letter.
 
 `find --print` groups terminal matches under Markdown headings and shows short excerpts.
 When piped, `find` always prints `path:line:text` records, as in `shellnote find nginx | grep 502`.
 
 Use Enter to select and Escape to cancel.
+Picker search matches exact text in titles and matching lines, not filenames, so a case number never matches a timestamp.
+Space-separated words must all match.
+Search result previews scroll to the matching line and highlight it.
+The preview moves below the list in windows narrower than 100 columns.
 Add inline tags such as `#work` or `#project-alpha` to Markdown notes.
 Tags are case-sensitive and start at a line boundary or after whitespace.
 They contain ASCII letters, digits, underscores, and hyphens, starting with a letter or digit.
