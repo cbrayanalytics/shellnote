@@ -31,7 +31,8 @@ usage() {
         '  l, list [-t TAG]          List titles and paths, recently modified first' \
         '  f, find [-p] TEXT...      Search literally, ignoring case unless TEXT has capitals' \
         '                            -p, --print (automatic when piped) prints matches' \
-        '  t, tags [TAG]             Browse tags or notes with an exact tag' \
+        '  t, tags [TAG]             Pick a tag, or open notes with TAG at the tag line' \
+        '                            Suggests close tags when TAG has no notes' \
         '  commit [MESSAGE...]       Commit Markdown notes locally (default: timestamp)' \
         '  push                      Push to the configured upstream' \
         '  sync [MESSAGE...]         Commit, then push' \
