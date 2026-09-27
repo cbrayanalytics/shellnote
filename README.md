@@ -28,12 +28,28 @@ Put `--` before text that starts with a hyphen, as in `shellnote find -- --force
 Storage is created on first use.
 Titles become Markdown headings, and files receive unique timestamped names.
 
+## Capture command output
+
+```sh
+journalctl -u nginx --since -1h | shellnote new case 04512 nginx logs
+```
+
+```sh
+nginx -t 2>&1 | shellnote add 04512
+```
+
+`new` with piped input creates the note without opening the editor.
+`add` appends piped input to the note matching every word, or to the most recently modified note when no words are given.
+Output lands in a fenced code block, and empty input changes nothing.
+Input redirected from a file counts as piped.
+
 ## Find and edit
 
 | Command | Action |
 | --- | --- |
 | `shellnote` | Browse notes by title with previews and open a selection. |
 | `shellnote edit 04512 nginx` | Edit the note whose title or path contains every word. |
+| `shellnote last` | Edit the most recently modified note at its last line. |
 | `shellnote show 04512` | Print the matching note without opening an editor. |
 | `shellnote list` | Print note titles and paths. |
 | `shellnote list --tag work` | Print notes with the exact tag `#work`. |

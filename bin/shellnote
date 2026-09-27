@@ -24,7 +24,10 @@ usage() {
         '  init [--git]           Initialize notes storage (optionally Git)' \
         '  new TITLE...           Create and edit a note' \
         '  edit [MATCH...]        Edit the note whose title or path matches' \
+        '  last                   Edit the most recently modified note at its end' \
         '  show MATCH...          Print the note whose title or path matches' \
+        '  CMD | new TITLE...     Create a note from piped output without the editor' \
+        '  CMD | add [MATCH...]   Append piped output to a matching or the last note' \
         '  list [--tag TAG]       List titles and paths, recently modified first' \
         '  find [-p] TEXT...      Search literally, ignoring case unless TEXT has capitals' \
         '                         -p, --print prints matches instead of opening a picker' \
@@ -118,12 +121,44 @@ edit_note() {
     check_private "$target" 600
     return "$result"
 }
+stdin_piped() { [ -p /dev/stdin ] || [ -f /dev/stdin ]; }
+cleanup_temp() {
+    [ -z "${picker_map:-}" ] || rm -f -- "$picker_map"
+    [ -z "${capture_file:-}" ] || rm -f -- "$capture_file"
+}
+# Copies stdin to a private file first so empty or failed input changes no note.
+capture_stdin() {
+    capture_file=$(mktemp "$notes_dir/.capture.XXXXXXXX") || die 'cannot capture input'
+    trap cleanup_temp EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    cat > "$capture_file" || die 'cannot read input'
+    [ -s "$capture_file" ] || die 'no input to add'
+}
+# Appends the captured input in a fence longer than any backtick run inside it.
+append_capture() {
+    local target=$1 longest fence='```'
+    validate_note "$target"
+    longest=$(LC_ALL=C tr -c '`' '\n' < "$capture_file" | awk '{ if (length > m) m = length } END { print m + 0 }') \
+        || die 'cannot inspect input'
+    while [ "${#fence}" -le "$longest" ]; do fence="$fence\`"; done
+    # A note without a final newline would otherwise glue its last line to the fence.
+    [ -z "$(tail -c 1 -- "$target")" ] || fence=$'\n'"$fence"
+    {
+        printf '\n%s\n' "$fence"
+        cat -- "$capture_file"
+        [ -z "$(tail -c 1 -- "$capture_file")" ] || printf '\n'
+        printf '%s\n' "${fence#$'\n'}"
+    } >> "$target" || die "cannot append to note: $target"
+    check_private "$target" 600
+}
 create_note() {
-    local title=$1 slug filename stamp
+    local title=$1 capture=${2:-false} slug filename stamp
     [ -n "$title" ] || die 'new requires a nonempty title'
     case "$title" in *$'\n'*|*$'\r'*) die 'title must fit on one line';; esac
-    require_command nvim
+    [ "$capture" = true ] || require_command nvim
     ensure_notes_dir
+    [ "$capture" = false ] || capture_stdin
     slug=$(printf '%s' "$title" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs 'a-z0-9' '-' | cut -c 1-48)
     slug=${slug#-}; slug=${slug%-}
     [ -n "$slug" ] || slug=note
@@ -136,6 +171,13 @@ create_note() {
     fi
     rm -f -- "$filename" || exit 1
     filename=$filename.md
+    if [ "$capture" = true ]; then
+        printf '# %s\n' "$title" > "$filename" || die "cannot write note: $filename"
+        append_capture "$filename"
+        rel_label "$filename"
+        info "Created: $REPLY"
+        return
+    fi
     printf '# %s\n\n' "$title" > "$filename" || die "cannot write note: $filename"
     edit_note "$filename" 1
 }
@@ -250,15 +292,12 @@ picker() (
     use_color || color=--no-color
     fzf --height=80% --layout=reverse --border "$color" "$@"
 )
-cleanup_map() {
-    [ -z "${picker_map:-}" ] || rm -f -- "$picker_map"
-}
 select_note() {
     local action=${1:-edit} i selected result=0 id preview quoted_bash quoted_app quoted_map
     if [ "${#result_paths[@]}" = 0 ]; then info 'No matches.'; return 0; fi
     require_command fzf
     picker_map=$(mktemp "${TMPDIR:-/tmp}/shellnote-picker.XXXXXXXX") || die 'cannot create picker metadata'
-    trap cleanup_map EXIT
+    trap cleanup_temp EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     for ((i=0; i<${#result_paths[@]}; i++)); do
@@ -274,7 +313,7 @@ select_note() {
         done | picker --delimiter=$'\t' --with-nth=2.. --prompt='notes> ' \
             --preview "$preview" --preview-window=right:55%:wrap
     ) || result=$?
-    cleanup_map; picker_map=''
+    rm -f -- "$picker_map"; picker_map=''
     case "$result" in 1|130) return 0;; 0) ;; *) die "picker failed (exit $result)";; esac
     id=${selected%%$'\t'*}
     [[ "$id" =~ ^[1-9][0-9]*$ ]] && [ "${#id}" -lt 10 ] || die 'invalid picker selection'
@@ -283,12 +322,22 @@ select_note() {
     open_result "$action" "$i"
 }
 open_result() {
-    if [ "$1" = show ]; then
-        validate_note "${result_paths[$2]}"
-        sanitize < "${result_paths[$2]}"
-    else
-        edit_note "${result_paths[$2]}" "${result_lines[$2]}"
-    fi
+    case "$1" in
+        show) validate_note "${result_paths[$2]}"; sanitize < "${result_paths[$2]}";;
+        add) append_capture "${result_paths[$2]}"; info "Added to: ${result_labels[$2]}";;
+        *) edit_note "${result_paths[$2]}" "${result_lines[$2]}";;
+    esac
+}
+# Acts on the most recently modified note; editing starts at its last line to resume work.
+open_latest() {
+    ensure_notes_dir
+    collect_notes
+    [ "${#note_paths[@]}" -gt 0 ] || die 'no notes yet'
+    sort_recent
+    result_paths=(); result_lines=(); result_labels=()
+    add_note_result "${note_paths[0]}"
+    result_lines[0]='$'
+    open_result "$1" 0
 }
 preview_note() {
     local map=$1 id=$2 path line i=0
@@ -593,7 +642,17 @@ main() {
         new)
             parse_options 'new TITLE...' "$@"; shift "$option_count"
             [ "$#" -ge 1 ] || die 'usage: shellnote new TITLE...'
-            create_note "$*";;
+            if stdin_piped; then create_note "$*" true; else create_note "$*"; fi;;
+        add)
+            parse_options 'add [MATCH...]' "$@"; shift "$option_count"
+            stdin_piped || die 'usage: COMMAND | shellnote add [MATCH...]'
+            ensure_notes_dir
+            capture_stdin
+            if [ "$#" = 0 ]; then open_latest add; else open_match add "$@"; fi;;
+        last)
+            parse_options 'last' "$@"; shift "$option_count"
+            [ "$#" = 0 ] || die 'usage: shellnote last'
+            open_latest edit;;
         browse) [ "$#" = 0 ] || die 'shellnote takes no arguments without a command'; browse_notes;;
         edit)
             parse_options 'edit [MATCH...]' "$@"; shift "$option_count"

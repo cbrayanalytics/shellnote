@@ -18,8 +18,15 @@ assert_equal() { [ "$1" = "$2" ] || fail "expected [$1], got [$2]"; }
 mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
 run() {
     result=0
-    "$BASH" "$app" "$@" > "$case_dir/stdout" 2> "$case_dir/stderr" || result=$?
+    "$BASH" "$app" "$@" < /dev/null > "$case_dir/stdout" 2> "$case_dir/stderr" || result=$?
 }
+run_input() {
+    local input=$1
+    shift
+    result=0
+    printf '%s' "$input" | "$BASH" "$app" "$@" > "$case_dir/stdout" 2> "$case_dir/stderr" || result=$?
+}
+captures() { find "$NOTES_DIR" -name '.capture.*'; }
 run_tty() {
     result=0
     NO_COLOR=1 TERM=xterm script -q "$case_dir/tty-output" "$BASH" "$app" "$@" > /dev/null 2> "$case_dir/stderr" || result=$?
@@ -233,6 +240,48 @@ test_show_note() {
     run show one.md; success
     assert_equal $'# One\n\nVisible text' "$(cat "$case_dir/stdout")"
     run show ../outside.md; failure
+}
+test_new_from_pipe() {
+    run_input $'Active: failed\n```inner```' new case 04512 status; success
+    [ ! -e "$TEST_EDITOR_ARGS" ] || fail 'piped new opened editor'
+    note=$(notes)
+    assert_equal 600 "$(mode "$note")"
+    assert_equal $'# case 04512 status\n\n````\nActive: failed\n```inner```\n````' "$(cat "$note")"
+    contains "$case_dir/stdout" 'Created: '
+    run_input '' new empty; failure
+    contains "$case_dir/stderr" 'no input'
+    assert_equal 1 "$(notes | wc -l | tr -d ' ')"
+    assert_equal '' "$(captures)"
+}
+test_add_from_pipe() {
+    fixture_note a.md '# Case 04512 nginx'
+    fixture_note b.md $'# Case 04513 disk\nno newline'
+    printf 'tail' >> "$NOTES_DIR/b.md"
+    touch -t 202601010000 "$NOTES_DIR/a.md"
+    touch -t 202602010000 "$NOTES_DIR/b.md"
+    run_input $'df output\n' add; success
+    assert_equal $'# Case 04513 disk\nno newline\ntail\n\n```\ndf output\n```' "$(cat "$NOTES_DIR/b.md")"
+    contains "$case_dir/stdout" 'Added to: Case 04513 disk'
+    run_input 'nginx -t' add 04512; success
+    assert_equal $'# Case 04512 nginx\n\n```\nnginx -t\n```' "$(cat "$NOTES_DIR/a.md")"
+    run add 04512; failure
+    contains "$case_dir/stderr" 'COMMAND \| shellnote add'
+    run_input 'x' add absent; failure
+    run_input '' add 04512; failure
+    assert_equal $'# Case 04512 nginx\n\n```\nnginx -t\n```' "$(cat "$NOTES_DIR/a.md")"
+    assert_equal 600 "$(mode "$NOTES_DIR/a.md")"
+    assert_equal '' "$(captures)"
+}
+test_last_note() {
+    run last; failure
+    fixture_note a.md '# Older'
+    fixture_note b.md '# Newer'
+    touch -t 202601010000 "$NOTES_DIR/a.md"
+    touch -t 202602010000 "$NOTES_DIR/b.md"
+    run last; success; editor_args
+    assert_equal "$NOTES_DIR/b.md" "$editor_last"
+    printf '%s\n' "${editor_values[@]}" | rg -qx '\+\$' || fail 'last did not open at the end'
+    [ ! -e "$TEST_PICKER_ROWS" ] || fail 'last opened picker'
 }
 test_match_notes() {
     fixture_note 20260101T000000Z-case.a.md $'# Case 04512 nginx 502s\nbody'
@@ -482,7 +531,7 @@ test_git_icase_pathspec_environment() {
 
 storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_unquoted_words test_command_options test_invalid_arguments test_real_nvim_privacy test_missing_editor_creates_nothing'
 selected=${1:-all}
-search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_list_empty test_literal_search test_print_search test_smart_case_search test_print_search_tty test_show_note test_match_notes test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
+search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_list_empty test_literal_search test_print_search test_smart_case_search test_print_search_tty test_show_note test_match_notes test_new_from_pipe test_add_from_pipe test_last_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
 git_tests='test_git_init test_commit_notes test_unrelated_staged_refused test_untracked_unrelated_ignored test_parent_repository_rejected test_git_environment_isolation test_push_local_remote test_push_missing_upstream test_staged_symlink_refused test_unrelated_rename_refused test_git_literal_pathspec_environment test_git_icase_pathspec_environment'
 case "$selected" in storage) tests=$storage_tests;; search) tests=$search_tests;; git) tests=$git_tests;; all) tests="$storage_tests $search_tests $git_tests";; *) fail "unknown test group: $selected";; esac
 passed=0
