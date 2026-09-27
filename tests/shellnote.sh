@@ -67,6 +67,21 @@ test_repeated_title() {
     [ "$first_note" != "$editor_last" ] || fail 'filename collision'
     contains "$first_note" 'Keep this'
 }
+test_unquoted_words() {
+    run new case 04512 nginx 502s; success
+    editor_args
+    assert_equal '# case 04512 nginx 502s' "$(head -n 1 "$editor_last")"
+}
+test_command_options() {
+    run new -h; success
+    contains "$case_dir/stdout" 'usage: shellnote new'
+    run find --help; success
+    run new --bogus title; failure
+    contains "$case_dir/stderr" 'unknown option'
+    run list --print; failure
+    [ ! -e "$TEST_EDITOR_ARGS" ] || fail 'option was treated as a title'
+    [ ! -e "$NOTES_DIR" ] || fail 'option handling created storage'
+}
 test_unicode_title() {
     run new 'Café 🌱'; success
     editor_args
@@ -76,7 +91,7 @@ test_editor_arguments() {
     # Literal shell syntax must reach the heading without execution.
     # shellcheck disable=SC2016
     title='-Meeting "quotes" $(touch PWNED) `touch PWNED`'
-    run new "$title"; success
+    run new -- "$title"; success
     editor_args
     assert_equal "# $title" "$(head -n 1 "$editor_last")"
     [ ! -e "$NOTES_DIR/PWNED" ] || fail 'executed title'
@@ -151,12 +166,23 @@ test_browse_selection() {
 test_list_notes() {
     fixture_note first.md $'# First note\n#work'
     fixture_note second.md $'# Second note\n#home'
+    touch -t 202601010000 "$NOTES_DIR/first.md"
+    touch -t 202602010000 "$NOTES_DIR/second.md"
     run list; success
-    assert_equal $'First note\tfirst.md\nSecond note\tsecond.md' "$(cat "$case_dir/stdout")"
+    assert_equal $'Second note\tsecond.md\nFirst note\tfirst.md' "$(cat "$case_dir/stdout")"
     run list --tag work; success
     assert_equal $'First note\tfirst.md' "$(cat "$case_dir/stdout")"
     run list --tag absent; success
     assert_equal '' "$(cat "$case_dir/stdout")"
+}
+test_browse_recent_titles() {
+    fixture_note a.md '# Older case'
+    fixture_note b.md 'untitled'
+    touch -t 202601010000 "$NOTES_DIR/a.md"
+    touch -t 202602010000 "$NOTES_DIR/b.md"
+    export TEST_PICKER_MATCH=nothing
+    run; success
+    assert_equal $'1\tb.md\n2\tOlder case  (a.md)' "$(cat "$TEST_PICKER_ROWS")"
 }
 test_list_empty() {
     run list; success
@@ -176,6 +202,16 @@ test_print_search() {
     run find --print needle; success
     assert_equal $'one.md:2: needle here\ntwo.md:1: needle too' "$(cat "$case_dir/stdout")"
     [ ! -e "$TEST_EDITOR_ARGS" ] || fail 'print search opened editor'
+}
+test_smart_case_search() {
+    fixture_note one.md 'Connection Refused on port 22'
+    run find --print connection refused; success
+    assert_equal 'one.md:1: Connection Refused on port 22' "$(cat "$case_dir/stdout")"
+    run find -p Connection refused; success
+    assert_equal '' "$(cat "$case_dir/stdout")"
+    fixture_note two.md 'run --force now'
+    run find -p -- --force; success
+    assert_equal 'two.md:1: run --force now' "$(cat "$case_dir/stdout")"
 }
 test_print_search_tty() {
     fixture_note one.md $'# One\n\n## Cleanup\nneedle here'
@@ -197,6 +233,21 @@ test_show_note() {
     run show one.md; success
     assert_equal $'# One\n\nVisible text' "$(cat "$case_dir/stdout")"
     run show ../outside.md; failure
+}
+test_match_notes() {
+    fixture_note 20260101T000000Z-case.a.md $'# Case 04512 nginx 502s\nbody'
+    fixture_note 20260102T000000Z-case.b.md '# Case 04513 disk full'
+    run show 04512 NGINX; success
+    assert_equal $'# Case 04512 nginx 502s\nbody' "$(cat "$case_dir/stdout")"
+    run show 04513 nginx; failure
+    contains "$case_dir/stderr" 'no note matches'
+    run edit disk; success; editor_args
+    assert_equal "$NOTES_DIR/20260102T000000Z-case.b.md" "$editor_last"
+    [ ! -e "$TEST_PICKER_ROWS" ] || fail 'unique match opened picker'
+    export TEST_PICKER_MATCH=04512
+    run edit case; success; editor_args
+    assert_equal "$NOTES_DIR/20260101T000000Z-case.a.md" "$editor_last"
+    assert_equal 2 "$(wc -l < "$TEST_PICKER_ROWS" | tr -d ' ')"
 }
 test_tags_exact() {
     fixture_note work.md $'# Heading\n#work, #work #work\n```\n#code\n```'
@@ -429,9 +480,9 @@ test_git_icase_pathspec_environment() {
     assert_equal '# Changed' "$(git_notes show HEAD:note.md)"
 }
 
-storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_invalid_arguments test_real_nvim_privacy test_missing_editor_creates_nothing'
+storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_unquoted_words test_command_options test_invalid_arguments test_real_nvim_privacy test_missing_editor_creates_nothing'
 selected=${1:-all}
-search_tests='test_browse_selection test_list_notes test_list_empty test_literal_search test_print_search test_print_search_tty test_show_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
+search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_list_empty test_literal_search test_print_search test_smart_case_search test_print_search_tty test_show_note test_match_notes test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
 git_tests='test_git_init test_commit_notes test_unrelated_staged_refused test_untracked_unrelated_ignored test_parent_repository_rejected test_git_environment_isolation test_push_local_remote test_push_missing_upstream test_staged_symlink_refused test_unrelated_rename_refused test_git_literal_pathspec_environment test_git_icase_pathspec_environment'
 case "$selected" in storage) tests=$storage_tests;; search) tests=$search_tests;; git) tests=$git_tests;; all) tests="$storage_tests $search_tests $git_tests";; *) fail "unknown test group: $selected";; esac
 passed=0

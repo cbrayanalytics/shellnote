@@ -20,9 +20,11 @@ No editor plugin is required.
 ## Create a note
 
 ```sh
-shellnote new "Meeting notes"
+shellnote new case 04512 nginx 502s
 ```
 
+Arguments need no quotes.
+Put `--` before text that starts with a hyphen, as in `shellnote find -- --force`.
 Storage is created on first use.
 Titles become Markdown headings, and files receive unique timestamped names.
 
@@ -30,15 +32,21 @@ Titles become Markdown headings, and files receive unique timestamped names.
 
 | Command | Action |
 | --- | --- |
-| `shellnote` | Browse notes with previews and open a selection. |
-| `shellnote list` | Print note paths and titles. |
+| `shellnote` | Browse notes by title with previews and open a selection. |
+| `shellnote edit 04512 nginx` | Edit the note whose title or path contains every word. |
+| `shellnote show 04512` | Print the matching note without opening an editor. |
+| `shellnote list` | Print note titles and paths. |
 | `shellnote list --tag work` | Print notes with the exact tag `#work`. |
-| `shellnote find "deployment"` | Search literal text and jump to the selected line. |
-| `shellnote find --print "deployment"` | Print matching note paths, lines, and text. |
-| `shellnote show note.md` | Print one note without opening an editor. |
+| `shellnote find connection refused` | Search literal text and jump to the selected line. |
+| `shellnote find -p connection refused` | Print matching note paths, lines, and text. |
 | `shellnote tags` | Pick a tag, then a matching note. |
 | `shellnote tags work` | Find the exact tag `#work`. |
-| `shellnote help` | Show command help. |
+| `shellnote help` | Show command help. `shellnote COMMAND -h` shows one command's usage. |
+
+`edit` and `show` match words against titles and paths, ignoring case.
+One match opens directly, and several matches open the picker.
+The browser, `list`, and match pickers show recently modified notes first.
+`find` ignores case unless the text contains a capital letter.
 
 `find --print` groups terminal matches under Markdown headings and shows short excerpts. When piped, it prints `path:line:text` records.
 
@@ -70,7 +78,7 @@ shellnote init --git
 Commit Markdown additions, edits, and deletions:
 
 ```sh
-shellnote commit "Weekly notes"
+shellnote commit weekly notes
 ```
 
 Shellnote also includes its own generated `.gitignore`.

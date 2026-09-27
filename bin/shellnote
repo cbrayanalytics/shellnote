@@ -21,16 +21,21 @@ usage() {
         '' \
         'Usage: shellnote [command]' \
         '  (no command)       Browse and edit notes' \
-        '  init [--git]       Initialize notes storage (optionally Git)' \
-        '  new "Title"        Create and edit a note' \
-        '  list [--tag TAG]   List note paths and titles' \
-        '  find "Text"        Search note contents literally' \
-        '  find --print "Text"  Print search matches without opening a picker' \
-        '  show PATH           Print one note without opening an editor' \
-        '  tags [tag]         Browse tags or notes with an exact tag' \
-        '  commit "Message"   Commit Markdown notes locally' \
-        '  push               Push to the configured upstream' \
-        '  help, --help       Show this help' \
+        '  init [--git]           Initialize notes storage (optionally Git)' \
+        '  new TITLE...           Create and edit a note' \
+        '  edit [MATCH...]        Edit the note whose title or path matches' \
+        '  show MATCH...          Print the note whose title or path matches' \
+        '  list [--tag TAG]       List titles and paths, recently modified first' \
+        '  find [-p] TEXT...      Search literally, ignoring case unless TEXT has capitals' \
+        '                         -p, --print prints matches instead of opening a picker' \
+        '  tags [TAG]             Browse tags or notes with an exact tag' \
+        '  commit MESSAGE...      Commit Markdown notes locally' \
+        '  push                   Push to the configured upstream' \
+        '  help, -h, --help       Show this help (COMMAND -h shows its usage)' \
+        '' \
+        'Words need no quotes: shellnote new case 04512 nginx 502s' \
+        'MATCH words must all appear in a title or path, ignoring case.' \
+        'Put -- before text that starts with -: shellnote find -- --force' \
         '' \
         'NOTES_DIR overrides ~/.notes. NOTE_EMOJI=1 enables icons.' \
         'NO_COLOR disables color. Notes are private files, not encrypted.'
@@ -134,6 +139,31 @@ create_note() {
     printf '# %s\n\n' "$title" > "$filename" || die "cannot write note: $filename"
     edit_note "$filename" 1
 }
+# Consumes leading options that appear in the usage text and sets option_count and opt_*.
+# Unknown options fail so a typo is never saved as a title or searched as text.
+parse_options() {
+    local usage=$1
+    shift
+    option_count=0; opt_git=false; opt_print=false; opt_tag=''
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help) printf 'usage: shellnote %s\n' "$usage"; exit 0;;
+            --) option_count=$((option_count + 1)); return 0;;
+            --git) [[ "$usage" == *--git* ]] || unknown_option "$1" "$usage"; opt_git=true;;
+            -p|--print) [[ "$usage" == *--print* ]] || unknown_option "$1" "$usage"; opt_print=true;;
+            --tag)
+                [[ "$usage" == *--tag* ]] || unknown_option "$1" "$usage"
+                [ "$#" -ge 2 ] || die "usage: shellnote $usage"
+                opt_tag=$2; shift; option_count=$((option_count + 1));;
+            -?*) unknown_option "$1" "$usage";;
+            *) return 0;;
+        esac
+        shift; option_count=$((option_count + 1))
+    done
+}
+unknown_option() {
+    die "unknown option: $1 (usage: shellnote $2; put -- before text starting with -)"
+}
 sanitize() {
     LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
 }
@@ -187,8 +217,31 @@ filter_by_tag() {
     for ((i=0; i<${#rg_paths[@]}; i++)); do note_paths+=("${rg_paths[i]}"); done
 }
 add_note_result() {
-    rel_label "$1"
+    local rel
+    rel_label "$1"; rel=$REPLY
+    if note_title "$1"; then REPLY="$REPLY  ($rel)"; fi
     result_paths+=("$1"); result_lines+=(1); result_labels+=("$REPLY")
+}
+# Reorders note_paths by modification time, newest first, so active cases sit at the top.
+# Ties keep path order. Batched like rg_notes to stay under ARG_MAX.
+sort_recent() {
+    local i index mtime order=''
+    local -a mtimes=() sorted=()
+    [ "${#note_paths[@]}" -gt 1 ] || return 0
+    file_metadata "${note_paths[0]}" || die "cannot inspect: ${note_paths[0]}"
+    for ((i=0; i<${#note_paths[@]}; i+=256)); do
+        if [ "$stat_style" = gnu ]; then
+            order=$(stat -c %Y -- "${note_paths[@]:i:256}") || die 'cannot read modification times'
+        else
+            order=$(stat -f %m -- "${note_paths[@]:i:256}") || die 'cannot read modification times'
+        fi
+        while IFS= read -r mtime; do mtimes+=("$mtime"); done <<< "$order"
+    done
+    [ "${#mtimes[@]}" = "${#note_paths[@]}" ] || die 'cannot read modification times'
+    while IFS=' ' read -r mtime index; do
+        sorted+=("${note_paths[index]}")
+    done < <(for ((i=0; i<${#mtimes[@]}; i++)); do printf '%s %s\n' "${mtimes[i]}" "$i"; done | sort -k1,1nr -k2,2n)
+    note_paths=("${sorted[@]}")
 }
 picker() (
     unset FZF_DEFAULT_OPTS FZF_DEFAULT_OPTS_FILE FZF_DEFAULT_COMMAND
@@ -201,7 +254,7 @@ cleanup_map() {
     [ -z "${picker_map:-}" ] || rm -f -- "$picker_map"
 }
 select_note() {
-    local i selected result=0 id preview quoted_bash quoted_app quoted_map
+    local action=${1:-edit} i selected result=0 id preview quoted_bash quoted_app quoted_map
     if [ "${#result_paths[@]}" = 0 ]; then info 'No matches.'; return 0; fi
     require_command fzf
     picker_map=$(mktemp "${TMPDIR:-/tmp}/shellnote-picker.XXXXXXXX") || die 'cannot create picker metadata'
@@ -227,7 +280,15 @@ select_note() {
     [[ "$id" =~ ^[1-9][0-9]*$ ]] && [ "${#id}" -lt 10 ] || die 'invalid picker selection'
     [ "$id" -le "${#result_paths[@]}" ] || die 'invalid picker selection'
     i=$((id-1))
-    edit_note "${result_paths[i]}" "${result_lines[i]}"
+    open_result "$action" "$i"
+}
+open_result() {
+    if [ "$1" = show ]; then
+        validate_note "${result_paths[$2]}"
+        sanitize < "${result_paths[$2]}"
+    else
+        edit_note "${result_paths[$2]}" "${result_lines[$2]}"
+    fi
 }
 preview_note() {
     local map=$1 id=$2 path line i=0
@@ -248,18 +309,19 @@ browse_notes() {
     local i
     ensure_notes_dir
     collect_notes
-    if [ "${#note_paths[@]}" = 0 ]; then info 'No notes yet. Create one: shellnote new "Title"'; return; fi
+    if [ "${#note_paths[@]}" = 0 ]; then info 'No notes yet. Create one: shellnote new Title'; return; fi
+    sort_recent
     result_paths=(); result_lines=(); result_labels=()
     for ((i=0; i<${#note_paths[@]}; i++)); do add_note_result "${note_paths[i]}"; done
     select_note
 }
-# Sets REPLY to the note's "# " heading, falling back to its relative path.
+# Sets REPLY to the note's "# " heading, falling back to its relative path with status 1.
 note_title() {
     local first_line=''
     IFS= read -r first_line < "$1" || true
     case "$first_line" in
         '# '*) label "${first_line#\# }";;
-        *) rel_label "$1";;
+        *) rel_label "$1"; return 1;;
     esac
 }
 list_notes() {
@@ -272,6 +334,7 @@ list_notes() {
         normalize_tag "$tag"
         filter_by_tag "$REPLY"
     fi
+    sort_recent
     for ((i=0; i<${#note_paths[@]}; i++)); do
         note_title "${note_paths[i]}"
         list_titles+=("$REPLY")
@@ -300,7 +363,7 @@ find_notes() {
     require_command rg
     ensure_notes_dir
     collect_notes
-    search_notes 'search failed' -n -F -e "$query"
+    search_notes 'search failed' -n -F --smart-case -e "$query"
     result_paths=(); result_lines=(); result_labels=(); result_contents=()
     for ((i=0; i<${#rg_paths[@]}; i++)); do
         line=${rg_rest[i]%%:*}; content=${rg_rest[i]#*:}
@@ -334,6 +397,11 @@ focused_preview() {
         REPLY=$text
     else
         prefix=${text%%"$query"*}
+        # Smart-case can match with different case, so retry the offset on lowercased copies.
+        if [ "$prefix" = "$text" ]; then
+            prefix=$(printf '%s' "$text" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+            prefix=${prefix%%"$(printf '%s' "$query" | LC_ALL=C tr '[:upper:]' '[:lower:]')"*}
+        fi
         start=$((${#prefix} - width / 3))
         [ "$start" -ge 0 ] || start=0
         REPLY=${text:start:width}
@@ -385,14 +453,34 @@ print_search_results() {
         done
     fi
 }
-show_note() {
-    local input=$1 path
-    case "/$input/" in */../*|*/./*) die 'show requires a relative note path';; esac
-    case "$input" in /*|'') die 'show requires a relative note path';; esac
+# Opens or prints the note matching every term; several matches open the picker.
+# Matching only considers collected notes, so no input can reach a path outside storage.
+open_match() {
+    local action=$1 i path rel haystack term matched exact
+    shift
     ensure_notes_dir
-    path="$notes_dir/$input"
-    validate_note "$path"
-    sanitize < "$path"
+    collect_notes
+    exact="$notes_dir/$*"
+    result_paths=(); result_lines=(); result_labels=()
+    for ((i=0; i<${#note_paths[@]}; i++)); do
+        if [ "${note_paths[i]}" = "$exact" ]; then add_note_result "$exact"; open_result "$action" 0; return; fi
+    done
+    sort_recent
+    shopt -s nocasematch
+    for ((i=0; i<${#note_paths[@]}; i++)); do
+        path=${note_paths[i]}; rel=${path#"$notes_dir"/}
+        note_title "$path"
+        haystack="$REPLY"$'\n'"$rel"
+        matched=true
+        for term in "$@"; do [[ "$haystack" == *"$term"* ]] || { matched=false; break; }; done
+        [ "$matched" = false ] || add_note_result "$path"
+    done
+    shopt -u nocasematch
+    case "${#result_paths[@]}" in
+        0) die "no note matches: $*";;
+        1) open_result "$action" 0;;
+        *) select_note "$action";;
+    esac
 }
 tag_notes() {
     local tag=$1 i result all_tags='' selected
@@ -411,6 +499,7 @@ tag_notes() {
     fi
     normalize_tag "$tag"
     filter_by_tag "$REPLY"
+    sort_recent
     result_paths=(); result_lines=(); result_labels=()
     for ((i=0; i<${#note_paths[@]}; i++)); do add_note_result "${note_paths[i]}"; done
     select_note
@@ -496,24 +585,43 @@ main() {
     case "$command" in
         help|--help|-h) [ "$#" = 0 ] || die 'help takes no arguments'; usage;;
         init)
-            [ "$#" = 0 ] || { [ "$#" = 1 ] && [ "$1" = --git ]; } || die 'usage: shellnote init [--git]'
-            [ "$#" = 0 ] || require_command git
+            parse_options 'init [--git]' "$@"; shift "$option_count"
+            [ "$#" = 0 ] || die 'usage: shellnote init [--git]'
+            [ "$opt_git" = false ] || require_command git
             ensure_notes_dir
-            if [ "$#" = 1 ]; then init_git; else info "Storage ready: $notes_dir"; fi;;
-        new) [ "$#" = 1 ] || die 'usage: shellnote new "Title"'; create_note "$1";;
+            if [ "$opt_git" = true ]; then init_git; else info "Storage ready: $notes_dir"; fi;;
+        new)
+            parse_options 'new TITLE...' "$@"; shift "$option_count"
+            [ "$#" -ge 1 ] || die 'usage: shellnote new TITLE...'
+            create_note "$*";;
         browse) [ "$#" = 0 ] || die 'shellnote takes no arguments without a command'; browse_notes;;
+        edit)
+            parse_options 'edit [MATCH...]' "$@"; shift "$option_count"
+            if [ "$#" = 0 ]; then browse_notes; else open_match edit "$@"; fi;;
+        show)
+            parse_options 'show MATCH...' "$@"; shift "$option_count"
+            [ "$#" -ge 1 ] || die 'usage: shellnote show MATCH...'
+            open_match show "$@";;
         list)
-            if [ "$#" = 0 ]; then list_notes
-            elif [ "$#" = 2 ] && [ "$1" = --tag ]; then list_notes "$2"
-            else die 'usage: shellnote list [--tag TAG]'; fi;;
+            parse_options 'list [--tag TAG]' "$@"; shift "$option_count"
+            [ "$#" = 0 ] || die 'usage: shellnote list [--tag TAG]'
+            list_notes "$opt_tag";;
         find)
-            if [ "$#" = 1 ]; then find_notes "$1"
-            elif [ "$#" = 2 ] && [ "$1" = --print ]; then find_notes "$2" true
-            else die 'usage: shellnote find [--print] "Text"'; fi;;
-        show) [ "$#" = 1 ] || die 'usage: shellnote show PATH'; show_note "$1";;
-        tags) [ "$#" -le 1 ] || die 'usage: shellnote tags [tag]'; tag_notes "${1:-}";;
-        commit) [ "$#" = 1 ] || die 'usage: shellnote commit "Message"'; commit_notes "$1";;
-        push) [ "$#" = 0 ] || die 'usage: shellnote push'; push_notes;;
+            parse_options 'find [-p|--print] TEXT...' "$@"; shift "$option_count"
+            [ "$#" -ge 1 ] || die 'usage: shellnote find [-p|--print] TEXT...'
+            find_notes "$*" "$opt_print";;
+        tags)
+            parse_options 'tags [TAG]' "$@"; shift "$option_count"
+            [ "$#" -le 1 ] || die 'usage: shellnote tags [TAG]'
+            tag_notes "${1:-}";;
+        commit)
+            parse_options 'commit MESSAGE...' "$@"; shift "$option_count"
+            [ "$#" -ge 1 ] || die 'usage: shellnote commit MESSAGE...'
+            commit_notes "$*";;
+        push)
+            parse_options 'push' "$@"; shift "$option_count"
+            [ "$#" = 0 ] || die 'usage: shellnote push'
+            push_notes;;
         __preview) [ "$#" = 2 ] || die 'invalid preview arguments'; ensure_notes_dir; preview_note "$1" "$2";;
         *) die "unknown command: $command (see shellnote help)";;
     esac
