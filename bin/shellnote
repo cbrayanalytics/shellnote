@@ -20,21 +20,22 @@ usage() {
         'shellnote — private Markdown notes in your terminal' \
         '' \
         'Usage: shellnote [command]' \
-        '  (no command)       Browse and edit notes' \
-        '  init [--git]           Initialize notes storage (optionally Git)' \
-        '  new TITLE...           Create and edit a note' \
-        '  edit [MATCH...]        Edit the note whose title or path matches' \
-        '  last                   Edit the most recently modified note at its end' \
-        '  show MATCH...          Print the note whose title or path matches' \
-        '  CMD | new TITLE...     Create a note from piped output without the editor' \
-        '  CMD | add [MATCH...]   Append piped output to a matching or the last note' \
-        '  list [--tag TAG]       List titles and paths, recently modified first' \
-        '  find [-p] TEXT...      Search literally, ignoring case unless TEXT has capitals' \
-        '                         -p, --print prints matches instead of opening a picker' \
-        '  tags [TAG]             Browse tags or notes with an exact tag' \
-        '  commit MESSAGE...      Commit Markdown notes locally' \
-        '  push                   Push to the configured upstream' \
-        '  help, -h, --help       Show this help (COMMAND -h shows its usage)' \
+        '  (no command)              Browse and edit notes' \
+        '  init [--git]              Initialize notes storage (optionally Git)' \
+        '  n, new TITLE...           Create and edit a note' \
+        '  e, edit [MATCH...]        Edit the note whose title or path matches' \
+        '  last                      Edit the most recently modified note at its end' \
+        '  s, show MATCH...          Print the note whose title or path matches' \
+        '  CMD | new TITLE...        Create a note from piped output without the editor' \
+        '  CMD | a, add [MATCH...]   Append piped output to a matching or the last note' \
+        '  l, list [--tag TAG]       List titles and paths, recently modified first' \
+        '  f, find [-p] TEXT...      Search literally, ignoring case unless TEXT has capitals' \
+        '                            -p, --print (automatic when piped) prints matches' \
+        '  t, tags [TAG]             Browse tags or notes with an exact tag' \
+        '  commit [MESSAGE...]       Commit Markdown notes locally (default: timestamp)' \
+        '  push                      Push to the configured upstream' \
+        '  sync [MESSAGE...]         Commit, then push' \
+        '  help, -h, --help          Show this help (COMMAND -h shows its usage)' \
         '' \
         'Words need no quotes: shellnote new case 04512 nginx 502s' \
         'MATCH words must all appear in a title or path, ignoring case.' \
@@ -587,6 +588,9 @@ init_git() {
 validate_tracked_note() {
     if [ -e "$notes_dir/$1" ] || [ -L "$notes_dir/$1" ]; then validate_note "$notes_dir/$1"; fi
 }
+commit_message() {
+    if [ "$#" -gt 0 ]; then printf '%s' "$*"; else date -u '+Notes %Y-%m-%d %H:%M UTC'; fi
+}
 commit_notes() {
     local message=$1 path owns_ignore=false index_result=0
     [ -n "$message" ] || die 'commit requires a nonempty message'
@@ -632,6 +636,10 @@ main() {
     local command=${1:-browse}
     [ "$#" = 0 ] || shift
     case "$command" in
+        n) command=new;; e) command=edit;; s) command=show;; a) command=add;;
+        l) command=list;; f) command='find';; t) command=tags;;
+    esac
+    case "$command" in
         help|--help|-h) [ "$#" = 0 ] || die 'help takes no arguments'; usage;;
         init)
             parse_options 'init [--git]' "$@"; shift "$option_count"
@@ -668,18 +676,23 @@ main() {
         find)
             parse_options 'find [-p|--print] TEXT...' "$@"; shift "$option_count"
             [ "$#" -ge 1 ] || die 'usage: shellnote find [-p|--print] TEXT...'
+            # A picker cannot feed a pipe, so piped output always prints.
+            [ ! -p /dev/stdout ] || opt_print=true
             find_notes "$*" "$opt_print";;
         tags)
             parse_options 'tags [TAG]' "$@"; shift "$option_count"
             [ "$#" -le 1 ] || die 'usage: shellnote tags [TAG]'
             tag_notes "${1:-}";;
         commit)
-            parse_options 'commit MESSAGE...' "$@"; shift "$option_count"
-            [ "$#" -ge 1 ] || die 'usage: shellnote commit MESSAGE...'
-            commit_notes "$*";;
+            parse_options 'commit [MESSAGE...]' "$@"; shift "$option_count"
+            commit_notes "$(commit_message "$@")";;
         push)
             parse_options 'push' "$@"; shift "$option_count"
             [ "$#" = 0 ] || die 'usage: shellnote push'
+            push_notes;;
+        sync)
+            parse_options 'sync [MESSAGE...]' "$@"; shift "$option_count"
+            commit_notes "$(commit_message "$@")" || exit
             push_notes;;
         __preview) [ "$#" = 2 ] || die 'invalid preview arguments'; ensure_notes_dir; preview_note "$1" "$2";;
         *) die "unknown command: $command (see shellnote help)";;

@@ -12,7 +12,11 @@ For this checkout, add the following to your shell configuration if desired:
 
 ```sh
 export PATH="$HOME/.local/shellnote/bin:$PATH"
+alias sn=shellnote
 ```
+
+Most commands have one-letter forms: `n` new, `e` edit, `s` show, `a` add, `l` list, `f` find, `t` tags.
+With the alias, `sn f connection refused` searches and `sn e 04512` opens a case note.
 
 Your existing Neovim configuration, including lazy.nvim, loads normally.
 No editor plugin is required.
@@ -64,7 +68,8 @@ One match opens directly, and several matches open the picker.
 The browser, `list`, and match pickers show recently modified notes first.
 `find` ignores case unless the text contains a capital letter.
 
-`find --print` groups terminal matches under Markdown headings and shows short excerpts. When piped, it prints `path:line:text` records.
+`find --print` groups terminal matches under Markdown headings and shows short excerpts.
+When piped, `find` always prints `path:line:text` records, as in `shellnote find nginx | grep 502`.
 
 Use Enter to select and Escape to cancel.
 Add inline tags such as `#work` or `#project-alpha` to Markdown notes.
@@ -97,6 +102,8 @@ Commit Markdown additions, edits, and deletions:
 shellnote commit weekly notes
 ```
 
+The message is optional and defaults to a UTC timestamp such as `Notes 2026-09-26 14:15 UTC`.
+
 Shellnote also includes its own generated `.gitignore`.
 It refuses to commit if unrelated files are already staged.
 It preserves an existing `.gitignore` and leaves that file under your manual Git control.
@@ -108,7 +115,9 @@ Then push explicitly:
 shellnote push
 ```
 
-There are no automatic commits, pushes, pulls, or remote changes.
+`shellnote sync [MESSAGE...]` commits and then pushes in one step.
+
+Nothing is committed or pushed unless you run `commit`, `push`, or `sync`, and shellnote never pulls.
 Pushed notes and history are readable by everyone with access to that repository.
 
 ## Privacy

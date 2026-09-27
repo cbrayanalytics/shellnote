@@ -29,7 +29,8 @@ run_input() {
 captures() { find "$NOTES_DIR" -name '.capture.*'; }
 run_tty() {
     result=0
-    NO_COLOR=1 TERM=xterm script -q "$case_dir/tty-output" "$BASH" "$app" "$@" > /dev/null 2> "$case_dir/stderr" || result=$?
+    # script fails when its own stdin is a socket, as under some agent or CI runners.
+    NO_COLOR=1 TERM=xterm script -q "$case_dir/tty-output" "$BASH" "$app" "$@" < /dev/null > /dev/null 2> "$case_dir/stderr" || result=$?
 }
 success() { [ "$result" = 0 ] || { cat "$case_dir/stderr" >&2; fail "exit $result"; }; }
 failure() { [ "$result" != 0 ] || fail 'unexpected success'; }
@@ -219,6 +220,27 @@ test_smart_case_search() {
     fixture_note two.md 'run --force now'
     run find -p -- --force; success
     assert_equal 'two.md:1: run --force now' "$(cat "$case_dir/stdout")"
+}
+test_piped_search_prints() {
+    fixture_note one.md 'needle here'
+    result=0
+    "$BASH" "$app" find needle < /dev/null 2> "$case_dir/stderr" | cat > "$case_dir/stdout" || result=$?
+    success
+    assert_equal 'one.md:1: needle here' "$(cat "$case_dir/stdout")"
+    [ ! -e "$TEST_PICKER_ARGS" ] || fail 'piped search opened picker'
+}
+test_short_commands() {
+    fixture_note a.md $'# Case 04512 nginx\nneedle'
+    run s 04512; success
+    contains "$case_dir/stdout" 'Case 04512 nginx'
+    run f -p needle; success
+    assert_equal 'a.md:2: needle' "$(cat "$case_dir/stdout")"
+    run l; success
+    assert_equal $'Case 04512 nginx\ta.md' "$(cat "$case_dir/stdout")"
+    run e nginx; success; editor_args
+    assert_equal "$NOTES_DIR/a.md" "$editor_last"
+    run_input 'out' a 04512; success
+    contains "$NOTES_DIR/a.md" '^out$'
 }
 test_print_search_tty() {
     fixture_note one.md $'# One\n\n## Cleanup\nneedle here'
@@ -429,6 +451,25 @@ test_commit_notes() {
     assert_equal 2 "$(git_notes rev-list --count HEAD)"
     run commit 'No changes'; success
     assert_equal 2 "$(git_notes rev-list --count HEAD)"
+    printf 'more\n' >> "$NOTES_DIR/one.md"
+    run commit; success
+    git_notes log -1 --format=%s | rg -q '^Notes [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC$' || fail 'missing default message'
+}
+test_sync_notes() {
+    run init --git; success
+    fixture_note one.md '# One'
+    git init --bare -q "$case_dir/remote.git"
+    git_notes remote add origin "$case_dir/remote.git"
+    run sync; failure
+    assert_equal 1 "$(git_notes rev-list --count HEAD)"
+    branch=$(git_notes symbolic-ref --short HEAD)
+    git_notes config "branch.$branch.remote" origin
+    git_notes config "branch.$branch.merge" "refs/heads/$branch"
+    run sync; success
+    assert_equal "$(git_notes rev-parse HEAD)" "$(git --git-dir="$case_dir/remote.git" rev-parse "refs/heads/$branch")"
+    printf 'two\n' >> "$NOTES_DIR/one.md"
+    run sync second pass; success
+    assert_equal 'second pass' "$(git --git-dir="$case_dir/remote.git" log -1 --format=%s "refs/heads/$branch")"
 }
 test_unrelated_staged_refused() {
     run init --git; success
@@ -531,8 +572,8 @@ test_git_icase_pathspec_environment() {
 
 storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_unquoted_words test_command_options test_invalid_arguments test_real_nvim_privacy test_missing_editor_creates_nothing'
 selected=${1:-all}
-search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_list_empty test_literal_search test_print_search test_smart_case_search test_print_search_tty test_show_note test_match_notes test_new_from_pipe test_add_from_pipe test_last_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
-git_tests='test_git_init test_commit_notes test_unrelated_staged_refused test_untracked_unrelated_ignored test_parent_repository_rejected test_git_environment_isolation test_push_local_remote test_push_missing_upstream test_staged_symlink_refused test_unrelated_rename_refused test_git_literal_pathspec_environment test_git_icase_pathspec_environment'
+search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_list_empty test_literal_search test_print_search test_piped_search_prints test_short_commands test_smart_case_search test_print_search_tty test_show_note test_match_notes test_new_from_pipe test_add_from_pipe test_last_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
+git_tests='test_git_init test_commit_notes test_unrelated_staged_refused test_untracked_unrelated_ignored test_parent_repository_rejected test_git_environment_isolation test_push_local_remote test_sync_notes test_push_missing_upstream test_staged_symlink_refused test_unrelated_rename_refused test_git_literal_pathspec_environment test_git_icase_pathspec_environment'
 case "$selected" in storage) tests=$storage_tests;; search) tests=$search_tests;; git) tests=$git_tests;; all) tests="$storage_tests $search_tests $git_tests";; *) fail "unknown test group: $selected";; esac
 passed=0
 failed=0
