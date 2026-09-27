@@ -20,6 +20,10 @@ run() {
     result=0
     "$BASH" "$app" "$@" > "$case_dir/stdout" 2> "$case_dir/stderr" || result=$?
 }
+run_tty() {
+    result=0
+    NO_COLOR=1 TERM=xterm script -q "$case_dir/tty-output" "$BASH" "$app" "$@" > /dev/null 2> "$case_dir/stderr" || result=$?
+}
 success() { [ "$result" = 0 ] || { cat "$case_dir/stderr" >&2; fail "exit $result"; }; }
 failure() { [ "$result" != 0 ] || fail 'unexpected success'; }
 contains() { rg -q -- "$2" "$1" || fail "missing pattern: $2"; }
@@ -144,6 +148,20 @@ test_browse_selection() {
     run; success; editor_args
     assert_equal "$NOTES_DIR/second.md" "$editor_last"
 }
+test_list_notes() {
+    fixture_note first.md $'# First note\n#work'
+    fixture_note second.md $'# Second note\n#home'
+    run list; success
+    assert_equal $'First note\tfirst.md\nSecond note\tsecond.md' "$(cat "$case_dir/stdout")"
+    run list --tag work; success
+    assert_equal $'First note\tfirst.md' "$(cat "$case_dir/stdout")"
+    run list --tag absent; success
+    assert_equal '' "$(cat "$case_dir/stdout")"
+}
+test_list_empty() {
+    run list; success
+    assert_equal '' "$(cat "$case_dir/stdout")"
+}
 test_literal_search() {
     fixture_note one.md $'No match\nDeploy [v1].*\nOther'
     fixture_note two.md 'Deploy v123'
@@ -151,6 +169,34 @@ test_literal_search() {
     assert_equal "$NOTES_DIR/one.md" "$editor_last"
     printf '%s\n' "${editor_values[@]}" | rg -q '^\+2$' || fail 'wrong matching line'
     [ "$(wc -l < "$TEST_PICKER_ROWS" | tr -d ' ')" = 1 ] || fail 'regex search instead of literal'
+}
+test_print_search() {
+    fixture_note one.md $'No match\nneedle here'
+    fixture_note two.md 'needle too'
+    run find --print needle; success
+    assert_equal $'one.md:2: needle here\ntwo.md:1: needle too' "$(cat "$case_dir/stdout")"
+    [ ! -e "$TEST_EDITOR_ARGS" ] || fail 'print search opened editor'
+}
+test_print_search_tty() {
+    fixture_note one.md $'# One\n\n## Cleanup\nneedle here'
+    fixture_note two.md 'needle too'
+    run_tty find --print needle; success
+    contains "$case_dir/tty-output" '# One'
+    contains "$case_dir/tty-output" '## Cleanup'
+    contains "$case_dir/tty-output" '  4  needle here'
+    if rg -q 'one.md:4:' "$case_dir/tty-output"; then fail 'tty search repeated the path'; fi
+    run_tty find --print Cleanup; success
+    contains "$case_dir/tty-output" '## Cleanup'
+    if rg -q '  3  ## Cleanup' "$case_dir/tty-output"; then fail 'tty search repeated a section heading'; fi
+    fixture_note three.md $'needle\033]52;c;payload\007 end'
+    run_tty find --print needle; success
+    if LC_ALL=C rg -q $'[\033\007]' "$case_dir/tty-output"; then fail 'tty search emitted terminal controls'; fi
+}
+test_show_note() {
+    fixture_note one.md $'# One\n\nVisible text'
+    run show one.md; success
+    assert_equal $'# One\n\nVisible text' "$(cat "$case_dir/stdout")"
+    run show ../outside.md; failure
 }
 test_tags_exact() {
     fixture_note work.md $'# Heading\n#work, #work #work\n```\n#code\n```'
@@ -385,7 +431,7 @@ test_git_icase_pathspec_environment() {
 
 storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_invalid_arguments test_real_nvim_privacy test_missing_editor_creates_nothing'
 selected=${1:-all}
-search_tests='test_browse_selection test_literal_search test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
+search_tests='test_browse_selection test_list_notes test_list_empty test_literal_search test_print_search test_print_search_tty test_show_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
 git_tests='test_git_init test_commit_notes test_unrelated_staged_refused test_untracked_unrelated_ignored test_parent_repository_rejected test_git_environment_isolation test_push_local_remote test_push_missing_upstream test_staged_symlink_refused test_unrelated_rename_refused test_git_literal_pathspec_environment test_git_icase_pathspec_environment'
 case "$selected" in storage) tests=$storage_tests;; search) tests=$search_tests;; git) tests=$git_tests;; all) tests="$storage_tests $search_tests $git_tests";; *) fail "unknown test group: $selected";; esac
 passed=0

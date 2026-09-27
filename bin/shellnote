@@ -5,10 +5,11 @@ umask 077
 
 die() { printf 'shellnote: %s\n' "$*" >&2; exit 1; }
 require_command() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+use_color() { [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; }
 info() {
     local prefix=''
     [ "${NOTE_EMOJI:-0}" != 1 ] || prefix='📝 '
-    if [ -t 1 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; then
+    if [ -t 1 ] && use_color; then
         printf '\033[32m%s%s\033[0m\n' "$prefix" "$*"
     else
         printf '%s%s\n' "$prefix" "$*"
@@ -22,7 +23,10 @@ usage() {
         '  (no command)       Browse and edit notes' \
         '  init [--git]       Initialize notes storage (optionally Git)' \
         '  new "Title"        Create and edit a note' \
+        '  list [--tag TAG]   List note paths and titles' \
         '  find "Text"        Search note contents literally' \
+        '  find --print "Text"  Print search matches without opening a picker' \
+        '  show PATH           Print one note without opening an editor' \
         '  tags [tag]         Browse tags or notes with an exact tag' \
         '  commit "Message"   Commit Markdown notes locally' \
         '  push               Push to the configured upstream' \
@@ -32,12 +36,17 @@ usage() {
         'NO_COLOR disables color. Notes are private files, not encrypted.'
     printf '%s\n' 'Dependencies: Bash 3.2+, Neovim (nvim), fzf, ripgrep (rg); Git is optional.'
 }
+stat_style=''
+# Sets metadata to "uid mode"; the stat flavor is probed once because the failed probe costs a process per call.
 file_metadata() {
-    stat -c '%u %a' -- "$1" 2>/dev/null || stat -f '%u %Lp' -- "$1"
+    if [ -z "$stat_style" ]; then
+        if stat -c %u -- / >/dev/null 2>&1; then stat_style=gnu; else stat_style=bsd; fi
+    fi
+    if [ "$stat_style" = gnu ]; then metadata=$(stat -c '%u %a' -- "$1"); else metadata=$(stat -f '%u %Lp' -- "$1"); fi
 }
 check_private() {
     local metadata owner permissions
-    metadata=$(file_metadata "$1") || die "cannot inspect: $1"
+    file_metadata "$1" || die "cannot inspect: $1"
     owner=${metadata%% *}
     permissions=${metadata#* }
     [ "$owner" = "$UID" ] || die "not owned by your user: $1"
@@ -53,7 +62,8 @@ resolve_notes_dir() {
         if [ -L "$component" ]; then
             case "$component" in /tmp|/var|/etc) ;; *) die "symlink storage path: $component";; esac
         fi
-        component=$(dirname -- "$component") || exit 1
+        component=${component%/*}
+        [ -n "$component" ] || component=/
     done
 }
 ensure_notes_dir() {
@@ -97,10 +107,10 @@ edit_note() {
         "+$line" -- "$target" || result=$?
     validate_note_location "$target"
     local metadata
-    metadata=$(file_metadata "$target") || exit 1
+    file_metadata "$target" || exit 1
     [ "${metadata%% *}" = "$UID" ] || die "editor changed note ownership: $target"
     chmod 600 "$target" || die "cannot restore private note permissions: $target"
-    validate_note "$target"
+    check_private "$target" 600
     return "$result"
 }
 create_note() {
@@ -127,22 +137,64 @@ create_note() {
 sanitize() {
     LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
 }
+# Sets REPLY instead of printing so hot loops avoid a subshell per label.
 label() {
-    printf '%s' "$1" | sanitize | tr '\t\r\n' '   '
+    local LC_ALL=C
+    REPLY=${1//[$'\t\r\n']/ }
+    REPLY=${REPLY//[[:cntrl:]]/}
 }
+rel_label() { label "${1#"$notes_dir"/}"; }
 collect_notes() {
     note_paths=()
     local path
     while IFS= read -r -d '' path; do
         validate_note "$path"
         note_paths+=("$path")
-    done < <(find "$notes_dir" -name .git -prune -o -type f -name '*.md' -print0)
+    done < <(find "$notes_dir" -name .git -prune -o -type f -name '*.md' -print0 | LC_ALL=C sort -z)
+}
+# Searches note_paths in bounded batches so large collections stay under ARG_MAX.
+rg_notes() {
+    local i status=1 result
+    for ((i=0; i<${#note_paths[@]}; i+=256)); do
+        result=0
+        rg --no-config --no-ignore --text --color=never --sort path --with-filename --null --no-heading \
+            "$@" -- "${note_paths[@]:i:256}" || result=$?
+        case "$result" in 0) status=0;; 1) ;; *) return 2;; esac
+    done
+    return "$status"
+}
+# Fills rg_paths and rg_rest from "path\0rest\n" records.
+# Process substitution hides the exit status, so a trailing record with an empty path carries it.
+search_notes() {
+    local error=$1 path rest status=2
+    shift
+    rg_paths=(); rg_rest=()
+    while IFS= read -r -d '' path && IFS= read -r rest; do
+        if [ -z "$path" ]; then status=$rest; break; fi
+        rg_paths+=("$path"); rg_rest+=("$rest")
+    done < <(rg_notes "$@"; printf '\0%s\n' "$?")
+    case "$status" in 0|1) ;; *) die "$error";; esac
+}
+normalize_tag() {
+    REPLY=${1#\#}
+    [[ "$REPLY" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die 'invalid tag: use letters, digits, underscores, or hyphens'
+}
+# Narrows note_paths to notes containing the exact tag.
+filter_by_tag() {
+    local i
+    search_notes 'tag search failed' --count -e "(^|[[:space:]])#$1([^A-Za-z0-9_-]|$)"
+    note_paths=()
+    for ((i=0; i<${#rg_paths[@]}; i++)); do note_paths+=("${rg_paths[i]}"); done
+}
+add_note_result() {
+    rel_label "$1"
+    result_paths+=("$1"); result_lines+=(1); result_labels+=("$REPLY")
 }
 picker() (
     unset FZF_DEFAULT_OPTS FZF_DEFAULT_OPTS_FILE FZF_DEFAULT_COMMAND
     export SHELL="$BASH"
     local color=--color=16
-    [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ] || color=--no-color
+    use_color || color=--no-color
     fzf --height=80% --layout=reverse --border "$color" "$@"
 )
 cleanup_map() {
@@ -193,48 +245,163 @@ preview_note() {
     die 'preview selection not found'
 }
 browse_notes() {
+    local i
     ensure_notes_dir
     collect_notes
     if [ "${#note_paths[@]}" = 0 ]; then info 'No notes yet. Create one: shellnote new "Title"'; return; fi
     result_paths=(); result_lines=(); result_labels=()
-    local path
-    for path in "${note_paths[@]}"; do
-        result_paths+=("$path"); result_lines+=(1)
-        result_labels+=("$(label "${path#"$notes_dir"/}")")
-    done
+    for ((i=0; i<${#note_paths[@]}; i++)); do add_note_result "${note_paths[i]}"; done
     select_note
 }
+# Sets REPLY to the note's "# " heading, falling back to its relative path.
+note_title() {
+    local first_line=''
+    IFS= read -r first_line < "$1" || true
+    case "$first_line" in
+        '# '*) label "${first_line#\# }";;
+        *) rel_label "$1";;
+    esac
+}
+list_notes() {
+    local tag=${1:-} i title_width=5 path_width=4 title_rule path_rule
+    local -a list_paths=() list_titles=()
+    ensure_notes_dir
+    collect_notes
+    if [ -n "$tag" ]; then
+        require_command rg
+        normalize_tag "$tag"
+        filter_by_tag "$REPLY"
+    fi
+    for ((i=0; i<${#note_paths[@]}; i++)); do
+        note_title "${note_paths[i]}"
+        list_titles+=("$REPLY")
+        [ "${#REPLY}" -le "$title_width" ] || title_width=${#REPLY}
+        rel_label "${note_paths[i]}"
+        list_paths+=("$REPLY")
+        [ "${#REPLY}" -le "$path_width" ] || path_width=${#REPLY}
+    done
+    if [ -t 1 ] && use_color; then
+        printf -v title_rule '%*s' "$title_width" ''
+        printf -v path_rule '%*s' "$path_width" ''
+        printf '\033[1;32m%-*s\033[0m  \033[2m%s\033[0m\n' "$title_width" TITLE PATH
+        printf '\033[2m%s  %s\033[0m\n' "${title_rule// /-}" "${path_rule// /-}"
+        for ((i=0; i<${#list_paths[@]}; i++)); do
+            printf '\033[1m%-*s\033[0m  \033[2m%s\033[0m\n' "$title_width" "${list_titles[i]}" "${list_paths[i]}"
+        done
+    else
+        for ((i=0; i<${#list_paths[@]}; i++)); do
+            printf '%s\t%s\n' "${list_titles[i]}" "${list_paths[i]}"
+        done
+    fi
+}
 find_notes() {
-    local query=$1 path matches result match line content
+    local query=$1 print_matches=${2:-false} i line content
     [ -n "$query" ] || die 'find requires nonempty text'
     require_command rg
     ensure_notes_dir
     collect_notes
-    result_paths=(); result_lines=(); result_labels=()
-    for path in "${note_paths[@]}"; do
-        result=0
-        matches=$(rg --no-config --no-ignore --text --color=never --no-heading --no-filename -n -F -- "$query" "$path") || result=$?
-        case "$result" in 1) continue;; 0) ;; *) die "search failed: $path";; esac
-        while IFS= read -r match; do
-            line=${match%%:*}; content=${match#*:}
-            result_paths+=("$path"); result_lines+=("$line")
-            result_labels+=("$(label "${path#"$notes_dir"/}:$line: $content")")
-        done <<< "$matches"
+    search_notes 'search failed' -n -F -e "$query"
+    result_paths=(); result_lines=(); result_labels=(); result_contents=()
+    for ((i=0; i<${#rg_paths[@]}; i++)); do
+        line=${rg_rest[i]%%:*}; content=${rg_rest[i]#*:}
+        result_paths+=("${rg_paths[i]}"); result_lines+=("$line"); result_contents+=("$content")
+        # Print mode never shows picker labels, so skip building them.
+        if [ "$print_matches" != true ]; then
+            rel_label "${rg_paths[i]}:$line: $content"
+            result_labels+=("$REPLY")
+        fi
     done
-    select_note
+    if [ "$print_matches" = true ]; then
+        print_search_results "$query"
+    else
+        select_note
+    fi
+}
+# Fills heading_lines and heading_texts with one note's Markdown headings in line order.
+load_headings() {
+    local records result=0 record
+    heading_lines=(); heading_texts=()
+    records=$(rg --no-config --no-ignore --text --color=never --no-filename -n -e '^#{1,6}[[:space:]]' -- "$1") || result=$?
+    case "$result" in 0) ;; 1) return 0;; *) die "heading search failed: $1";; esac
+    while IFS= read -r record; do
+        heading_lines+=("${record%%:*}"); heading_texts+=("${record#*:}")
+    done <<< "$records"
+}
+# Sets REPLY to a window of text around the first query match.
+focused_preview() {
+    local text=$1 query=$2 width=$3 prefix start=0
+    if [ "${#text}" -le "$width" ]; then
+        REPLY=$text
+    else
+        prefix=${text%%"$query"*}
+        start=$((${#prefix} - width / 3))
+        [ "$start" -ge 0 ] || start=0
+        REPLY=${text:start:width}
+        [ "$start" = 0 ] || REPLY="…$REPLY"
+        [ $((start + width)) -ge "${#text}" ] || REPLY="$REPLY…"
+    fi
+    REPLY=${REPLY//[|\`*]/ }
+    while [[ "$REPLY" == *'  '* ]]; do REPLY=${REPLY//  / }; done
+}
+print_search_results() {
+    local query=$1 i h=0 path previous_path='' previous_heading='' title heading='' preview_width=88
+    local title_on='' path_on='' color_off=''
+    if [[ "${COLUMNS:-}" =~ ^[0-9]+$ ]] && [ "$COLUMNS" -lt "$((preview_width + 8))" ]; then
+        preview_width=$((COLUMNS - 8))
+    fi
+    [ "$preview_width" -ge 20 ] || preview_width=20
+    if [ -t 1 ]; then
+        if use_color; then title_on=$'\033[1;32m'; path_on=$'\033[2m'; color_off=$'\033[0m'; fi
+        for ((i=0; i<${#result_paths[@]}; i++)); do
+            path=${result_paths[i]}
+            if [ "$path" != "$previous_path" ]; then
+                note_title "$path"; title=$REPLY
+                rel_label "$path"
+                [ -z "$previous_path" ] || printf '\n'
+                printf '%s# %s%s\n%s%s%s\n' "$title_on" "$title" "$color_off" "$path_on" "$REPLY" "$color_off"
+                previous_path=$path
+                previous_heading="# $title"
+                load_headings "$path"; h=0; heading=''
+            fi
+            # Matches arrive in line order, so the heading cursor only moves forward.
+            while [ "$h" -lt "${#heading_lines[@]}" ] && [ "${heading_lines[h]}" -le "${result_lines[i]}" ]; do
+                heading=${heading_texts[h]}; h=$((h+1))
+            done
+            if [ -n "$heading" ] && [ "$heading" != "$previous_heading" ]; then
+                label "$heading"
+                printf '\n%s\n' "$REPLY"
+                previous_heading=$heading
+            fi
+            [[ "${result_contents[i]}" =~ ^#{1,6}[[:space:]] ]] && continue
+            label "${result_contents[i]}"
+            focused_preview "$REPLY" "$query" "$preview_width"
+            printf '  %4s  %s\n' "${result_lines[i]}" "$REPLY"
+        done
+    else
+        for ((i=0; i<${#result_paths[@]}; i++)); do
+            rel_label "${result_paths[i]}"; path=$REPLY
+            label "${result_contents[i]}"
+            printf '%s:%s: %s\n' "$path" "${result_lines[i]}" "$REPLY"
+        done
+    fi
+}
+show_note() {
+    local input=$1 path
+    case "/$input/" in */../*|*/./*) die 'show requires a relative note path';; esac
+    case "$input" in /*|'') die 'show requires a relative note path';; esac
+    ensure_notes_dir
+    path="$notes_dir/$input"
+    validate_note "$path"
+    sanitize < "$path"
 }
 tag_notes() {
-    local tag=$1 path matches result token all_tags='' selected
+    local tag=$1 i result all_tags='' selected
     require_command rg
     ensure_notes_dir
     collect_notes
     if [ -z "$tag" ]; then
-        for path in "${note_paths[@]}"; do
-            result=0
-            matches=$(rg --no-config --no-ignore --text --color=never --no-filename -o -- '(^|[[:space:]])#[A-Za-z0-9][A-Za-z0-9_-]*' "$path") || result=$?
-            case "$result" in 1) continue;; 0) ;; *) die "tag search failed: $path";; esac
-            while IFS= read -r token; do all_tags="$all_tags#${token##*#}"$'\n'; done <<< "$matches"
-        done
+        search_notes 'tag search failed' -N -o -e '(^|[[:space:]])#[A-Za-z0-9][A-Za-z0-9_-]*'
+        for ((i=0; i<${#rg_rest[@]}; i++)); do all_tags="$all_tags#${rg_rest[i]##*#}"$'\n'; done
         if [ -z "$all_tags" ]; then info 'No tags found.'; return; fi
         require_command fzf
         result=0
@@ -242,16 +409,10 @@ tag_notes() {
         case "$result" in 1|130) return 0;; 0) ;; *) die "tag picker failed (exit $result)";; esac
         tag=$selected
     fi
-    tag=${tag#\#}
-    [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die 'invalid tag: use letters, digits, underscores, or hyphens'
+    normalize_tag "$tag"
+    filter_by_tag "$REPLY"
     result_paths=(); result_lines=(); result_labels=()
-    for path in "${note_paths[@]}"; do
-        result=0
-        rg --no-config --no-ignore --text --color=never -q -- "(^|[[:space:]])#$tag([^A-Za-z0-9_-]|$)" "$path" || result=$?
-        case "$result" in 1) continue;; 0) ;; *) die "tag search failed: $path";; esac
-        result_paths+=("$path"); result_lines+=(1)
-        result_labels+=("$(label "${path#"$notes_dir"/}")")
-    done
+    for ((i=0; i<${#note_paths[@]}; i++)); do add_note_result "${note_paths[i]}"; done
     select_note
 }
 notes_git() (
@@ -284,6 +445,10 @@ init_git() {
     fi
     info "Notes repository ready: $notes_dir"
 }
+# Deleted paths are fine to stage; anything still on disk must be a private note.
+validate_tracked_note() {
+    if [ -e "$notes_dir/$1" ] || [ -L "$notes_dir/$1" ]; then validate_note "$notes_dir/$1"; fi
+}
 commit_notes() {
     local message=$1 path owns_ignore=false index_result=0
     [ -n "$message" ] || die 'commit requires a nonempty message'
@@ -294,10 +459,7 @@ commit_notes() {
     [ "$index_result" -le 1 ] || die 'cannot inspect the Git index'
     while IFS= read -r -d '' path; do
         case "$path" in
-            *.md)
-                if [ -e "$notes_dir/$path" ] || [ -L "$notes_dir/$path" ]; then
-                    validate_note "$notes_dir/$path"
-                fi;;
+            *.md) validate_tracked_note "$path";;
             .gitignore) [ "$owns_ignore" = true ] || die 'unrelated staged file: .gitignore';;
             *) die "unrelated staged file: $path";;
         esac
@@ -307,11 +469,7 @@ commit_notes() {
     for path in "${note_paths[@]}"; do stage_paths+=(":(literal)${path#"$notes_dir"/}"); done
     while IFS= read -r -d '' path; do
         case "$path" in
-            *.md)
-                if [ -e "$notes_dir/$path" ] || [ -L "$notes_dir/$path" ]; then
-                    validate_note "$notes_dir/$path"
-                fi
-                stage_paths+=(":(literal)$path");;
+            *.md) validate_tracked_note "$path"; stage_paths+=(":(literal)$path");;
         esac
     done < <(notes_git ls-files --deleted -z --)
     if [ "$owns_ignore" = true ]; then
@@ -344,7 +502,15 @@ main() {
             if [ "$#" = 1 ]; then init_git; else info "Storage ready: $notes_dir"; fi;;
         new) [ "$#" = 1 ] || die 'usage: shellnote new "Title"'; create_note "$1";;
         browse) [ "$#" = 0 ] || die 'shellnote takes no arguments without a command'; browse_notes;;
-        find) [ "$#" = 1 ] || die 'usage: shellnote find "Text"'; find_notes "$1";;
+        list)
+            if [ "$#" = 0 ]; then list_notes
+            elif [ "$#" = 2 ] && [ "$1" = --tag ]; then list_notes "$2"
+            else die 'usage: shellnote list [--tag TAG]'; fi;;
+        find)
+            if [ "$#" = 1 ]; then find_notes "$1"
+            elif [ "$#" = 2 ] && [ "$1" = --print ]; then find_notes "$2" true
+            else die 'usage: shellnote find [--print] "Text"'; fi;;
+        show) [ "$#" = 1 ] || die 'usage: shellnote show PATH'; show_note "$1";;
         tags) [ "$#" -le 1 ] || die 'usage: shellnote tags [tag]'; tag_notes "${1:-}";;
         commit) [ "$#" = 1 ] || die 'usage: shellnote commit "Message"'; commit_notes "$1";;
         push) [ "$#" = 0 ] || die 'usage: shellnote push'; push_notes;;

@@ -31,10 +31,16 @@ Titles become Markdown headings, and files receive unique timestamped names.
 | Command | Action |
 | --- | --- |
 | `shellnote` | Browse notes with previews and open a selection. |
+| `shellnote list` | Print note paths and titles. |
+| `shellnote list --tag work` | Print notes with the exact tag `#work`. |
 | `shellnote find "deployment"` | Search literal text and jump to the selected line. |
+| `shellnote find --print "deployment"` | Print matching note paths, lines, and text. |
+| `shellnote show note.md` | Print one note without opening an editor. |
 | `shellnote tags` | Pick a tag, then a matching note. |
 | `shellnote tags work` | Find the exact tag `#work`. |
 | `shellnote help` | Show command help. |
+
+`find --print` groups terminal matches under Markdown headings and shows short excerpts. When piped, it prints `path:line:text` records.
 
 Use Enter to select and Escape to cancel.
 Add inline tags such as `#work` or `#project-alpha` to Markdown notes.
