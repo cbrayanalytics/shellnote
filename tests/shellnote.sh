@@ -180,6 +180,8 @@ test_list_notes() {
     assert_equal $'Second note\tsecond.md\nFirst note\tfirst.md' "$(cat "$case_dir/stdout")"
     run list --tag work; success
     assert_equal $'First note\tfirst.md' "$(cat "$case_dir/stdout")"
+    run list -t work; success
+    assert_equal $'First note\tfirst.md' "$(cat "$case_dir/stdout")"
     run list --tag absent; success
     assert_equal '' "$(cat "$case_dir/stdout")"
 }
@@ -241,6 +243,46 @@ test_short_commands() {
     assert_equal "$NOTES_DIR/a.md" "$editor_last"
     run_input 'out' a 04512; success
     contains "$NOTES_DIR/a.md" '^out$'
+}
+test_completion_words() {
+    run __complete titles; success
+    assert_equal '' "$(cat "$case_dir/stdout")"
+    [ ! -e "$NOTES_DIR" ] || fail 'completion created storage'
+    fixture_note a.md $'# Alpha\n#work #home'
+    fixture_note b.md 'untitled #work'
+    touch -t 202601010000 "$NOTES_DIR/a.md"
+    touch -t 202602010000 "$NOTES_DIR/b.md"
+    run __complete titles; success
+    assert_equal $'b.md\nAlpha' "$(cat "$case_dir/stdout")"
+    run __complete tags; success
+    assert_equal $'home\nwork' "$(cat "$case_dir/stdout")"
+}
+# Literal $(...) titles must never run during completion.
+# shellcheck disable=SC2016
+test_bash_completion() {
+    fixture_note a.md $'# Case 04512 $(touch PWNED) nginx\n#work'
+    fixture_note b.md $'# Other\n#home'
+    export PATH="$project_dir/bin:$PATH"
+    # shellcheck source=completions/shellnote.bash
+    . "$project_dir/completions/shellnote.bash"
+    COMP_WORDS=(sn sy); COMP_CWORD=1; _shellnote
+    assert_equal sync "${COMPREPLY[*]}"
+    COMP_WORDS=(sn e 04512); COMP_CWORD=2; _shellnote
+    assert_equal 1 "${#COMPREPLY[@]}"
+    assert_equal '# Case 04512 $(touch PWNED) nginx' "# $(eval "printf '%s' ${COMPREPLY[0]}")"
+    COMP_WORDS=(sn e 'case\ 04'); COMP_CWORD=2; _shellnote
+    assert_equal 1 "${#COMPREPLY[@]}"
+    COMP_WORDS=(sn l -t ''); COMP_CWORD=3; _shellnote
+    assert_equal 'home work' "${COMPREPLY[*]}"
+    COMP_WORDS=(sn t w); COMP_CWORD=2; _shellnote
+    assert_equal work "${COMPREPLY[*]}"
+    COMP_WORDS=(sn f -); COMP_CWORD=2; _shellnote
+    assert_equal '-p --print' "${COMPREPLY[*]}"
+    [ ! -e "$NOTES_DIR/PWNED" ] && [ ! -e PWNED ] || fail 'completion executed a title'
+}
+test_zsh_completion_syntax() {
+    command -v zsh >/dev/null || return 0
+    zsh -n "$project_dir/completions/_shellnote" || fail 'zsh completion syntax'
 }
 test_print_search_tty() {
     fixture_note one.md $'# One\n\n## Cleanup\nneedle here'
@@ -572,7 +614,7 @@ test_git_icase_pathspec_environment() {
 
 storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_unquoted_words test_command_options test_invalid_arguments test_real_nvim_privacy test_missing_editor_creates_nothing'
 selected=${1:-all}
-search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_list_empty test_literal_search test_print_search test_piped_search_prints test_short_commands test_smart_case_search test_print_search_tty test_show_note test_match_notes test_new_from_pipe test_add_from_pipe test_last_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
+search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_list_empty test_literal_search test_print_search test_piped_search_prints test_short_commands test_completion_words test_bash_completion test_zsh_completion_syntax test_smart_case_search test_print_search_tty test_show_note test_match_notes test_new_from_pipe test_add_from_pipe test_last_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
 git_tests='test_git_init test_commit_notes test_unrelated_staged_refused test_untracked_unrelated_ignored test_parent_repository_rejected test_git_environment_isolation test_push_local_remote test_sync_notes test_push_missing_upstream test_staged_symlink_refused test_unrelated_rename_refused test_git_literal_pathspec_environment test_git_icase_pathspec_environment'
 case "$selected" in storage) tests=$storage_tests;; search) tests=$search_tests;; git) tests=$git_tests;; all) tests="$storage_tests $search_tests $git_tests";; *) fail "unknown test group: $selected";; esac
 passed=0

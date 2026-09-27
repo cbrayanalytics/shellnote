@@ -28,7 +28,7 @@ usage() {
         '  s, show MATCH...          Print the note whose title or path matches' \
         '  CMD | new TITLE...        Create a note from piped output without the editor' \
         '  CMD | a, add [MATCH...]   Append piped output to a matching or the last note' \
-        '  l, list [--tag TAG]       List titles and paths, recently modified first' \
+        '  l, list [-t TAG]          List titles and paths, recently modified first' \
         '  f, find [-p] TEXT...      Search literally, ignoring case unless TEXT has capitals' \
         '                            -p, --print (automatic when piped) prints matches' \
         '  t, tags [TAG]             Browse tags or notes with an exact tag' \
@@ -194,7 +194,7 @@ parse_options() {
             --) option_count=$((option_count + 1)); return 0;;
             --git) [[ "$usage" == *--git* ]] || unknown_option "$1" "$usage"; opt_git=true;;
             -p|--print) [[ "$usage" == *--print* ]] || unknown_option "$1" "$usage"; opt_print=true;;
-            --tag)
+            -t|--tag)
                 [[ "$usage" == *--tag* ]] || unknown_option "$1" "$usage"
                 [ "$#" -ge 2 ] || die "usage: shellnote $usage"
                 opt_tag=$2; shift; option_count=$((option_count + 1));;
@@ -532,14 +532,38 @@ open_match() {
         *) select_note "$action";;
     esac
 }
+# Sets REPLY to every tag occurrence in note_paths, one "#tag" per line.
+collect_tags() {
+    local i
+    search_notes 'tag search failed' -N -o -e '(^|[[:space:]])#[A-Za-z0-9][A-Za-z0-9_-]*'
+    REPLY=''
+    for ((i=0; i<${#rg_rest[@]}; i++)); do REPLY="$REPLY#${rg_rest[i]##*#}"$'\n'; done
+}
+# Prints completion candidates quietly and never creates storage from a tab press.
+complete_words() {
+    local i
+    resolve_notes_dir
+    [ -d "$notes_dir" ] || return 0
+    ensure_notes_dir
+    collect_notes
+    case "$1" in
+        tags)
+            require_command rg
+            collect_tags
+            printf '%s' "$REPLY" | tr -d '#' | LC_ALL=C sort -u;;
+        titles)
+            sort_recent
+            for ((i=0; i<${#note_paths[@]}; i++)); do note_title "${note_paths[i]}"; printf '%s\n' "$REPLY"; done;;
+        *) die 'invalid completion request';;
+    esac
+}
 tag_notes() {
     local tag=$1 i result all_tags='' selected
     require_command rg
     ensure_notes_dir
     collect_notes
     if [ -z "$tag" ]; then
-        search_notes 'tag search failed' -N -o -e '(^|[[:space:]])#[A-Za-z0-9][A-Za-z0-9_-]*'
-        for ((i=0; i<${#rg_rest[@]}; i++)); do all_tags="$all_tags#${rg_rest[i]##*#}"$'\n'; done
+        collect_tags; all_tags=$REPLY
         if [ -z "$all_tags" ]; then info 'No tags found.'; return; fi
         require_command fzf
         result=0
@@ -670,8 +694,8 @@ main() {
             [ "$#" -ge 1 ] || die 'usage: shellnote show MATCH...'
             open_match show "$@";;
         list)
-            parse_options 'list [--tag TAG]' "$@"; shift "$option_count"
-            [ "$#" = 0 ] || die 'usage: shellnote list [--tag TAG]'
+            parse_options 'list [-t|--tag TAG]' "$@"; shift "$option_count"
+            [ "$#" = 0 ] || die 'usage: shellnote list [-t|--tag TAG]'
             list_notes "$opt_tag";;
         find)
             parse_options 'find [-p|--print] TEXT...' "$@"; shift "$option_count"
@@ -694,6 +718,7 @@ main() {
             parse_options 'sync [MESSAGE...]' "$@"; shift "$option_count"
             commit_notes "$(commit_message "$@")" || exit
             push_notes;;
+        __complete) [ "$#" = 1 ] || die 'invalid completion request'; complete_words "$1";;
         __preview) [ "$#" = 2 ] || die 'invalid preview arguments'; ensure_notes_dir; preview_note "$1" "$2";;
         *) die "unknown command: $command (see shellnote help)";;
     esac

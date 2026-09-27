@@ -18,6 +18,20 @@ alias sn=shellnote
 Most commands have one-letter forms: `n` new, `e` edit, `s` show, `a` add, `l` list, `f` find, `t` tags.
 With the alias, `sn f connection refused` searches and `sn e 04512` opens a case note.
 
+Tab completion covers commands, note titles for `edit`, `show`, and `add`, and tags for `tags` and `list -t`.
+Titles complete from any part, ignoring case, so `sn e 04512<Tab>` fills in the full title.
+For Zsh, add this to `~/.zshrc` before `compinit` runs:
+
+```sh
+fpath=("$HOME/.local/shellnote/completions" $fpath)
+```
+
+For Bash, add this to `~/.bashrc`:
+
+```sh
+source "$HOME/.local/shellnote/completions/shellnote.bash"
+```
+
 Your existing Neovim configuration, including lazy.nvim, loads normally.
 No editor plugin is required.
 
@@ -56,7 +70,7 @@ Input redirected from a file counts as piped.
 | `shellnote last` | Edit the most recently modified note at its last line. |
 | `shellnote show 04512` | Print the matching note without opening an editor. |
 | `shellnote list` | Print note titles and paths. |
-| `shellnote list --tag work` | Print notes with the exact tag `#work`. |
+| `shellnote list -t work` | Print notes with the exact tag `#work`. |
 | `shellnote find connection refused` | Search literal text and jump to the selected line. |
 | `shellnote find -p connection refused` | Print matching note paths, lines, and text. |
 | `shellnote tags` | Pick a tag, then a matching note. |

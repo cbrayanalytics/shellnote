@@ -1,0 +1,48 @@
+#compdef shellnote sn
+# Zsh completion for shellnote and the suggested sn alias.
+# Add this directory to fpath before compinit in ~/.zshrc:
+#   fpath=(~/.local/shellnote/completions $fpath)
+
+_shellnote_candidates() {
+  local -a found
+  found=(${(f)"$(shellnote __complete $1 2>/dev/null)"})
+  # Case-insensitive substring matching lets 04512 complete to a full title.
+  compadd -M 'm:{a-zA-Z}={A-Za-z} l:|=* r:|=*' -a found
+}
+
+_shellnote() {
+  local -a subcommands
+  subcommands=(
+    'new:create and edit a note'
+    'edit:edit a note whose title or path matches'
+    'last:edit the most recently modified note'
+    'show:print a matching note'
+    'add:append piped output to a note'
+    'list:list titles and paths'
+    'find:search note text'
+    'tags:browse tags'
+    'init:initialize storage'
+    'commit:commit notes'
+    'push:push notes'
+    'sync:commit, then push'
+    'help:show help'
+  )
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'shellnote command' subcommands
+    return
+  fi
+  case $words[2] in
+    e|edit|s|show|a|add) _shellnote_candidates titles ;;
+    l|list)
+      if [[ $words[CURRENT-1] == (-t|--tag) ]]; then
+        _shellnote_candidates tags
+      else
+        compadd -- -t --tag
+      fi ;;
+    f|find) [[ $PREFIX == -* ]] && compadd -- -p --print ;;
+    t|tags) (( CURRENT == 3 )) && _shellnote_candidates tags ;;
+    init) compadd -- --git ;;
+  esac
+}
+
+_shellnote "$@"
