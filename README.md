@@ -90,12 +90,16 @@ Picker search matches exact text in titles and matching lines, not filenames, so
 Space-separated words must all match.
 Search result previews scroll to the matching line and highlight it.
 The preview moves below the list in windows narrower than 100 columns.
+Press Ctrl-/ to hide or show the preview.
+Ages are green for today, yellow for this week, and dim after that.
+Previews color headings, `#tags`, and code blocks with your terminal's own colors, and `NO_COLOR` turns all color off.
 Add inline tags such as `#work` or `#project-alpha` to Markdown notes.
 Tags are case-sensitive and start at a line boundary or after whitespace.
 They contain ASCII letters, digits, underscores, and hyphens, starting with a letter or digit.
 `#work` does not match `#workshop` or `#Work`.
 Markdown headings are not tags, but tags inside code fences count.
-When no note has the tag, `tags` and `list -t` suggest similar tags, such as `#work` for `wrok` or `#Work` for `work`.
+When no note has the tag, `tags` opens a picker of similar tags, such as `#work` for `wrok` or `#Work` for `work`.
+`list -t` prints the same suggestions instead.
 
 ## Appearance and configuration
 

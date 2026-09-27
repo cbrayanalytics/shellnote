@@ -201,7 +201,7 @@ test_browse_recent_titles() {
     picker_args=$(tr '\0' '\n' < "$TEST_PICKER_ARGS")
     printf '%s\n' "$picker_args" | rg -qx -- '--exact' || fail 'fuzzy matching'
     printf '%s\n' "$picker_args" | rg -qx -- '--nth=2' || fail 'path is searchable'
-    printf '%s\n' "$picker_args" | rg -qx -- '--header=Enter edit · Esc cancel' || fail 'missing key hints'
+    printf '%s\n' "$picker_args" | rg -qx -- '--header=Enter edit · Esc cancel · Ctrl-/ preview' || fail 'missing key hints'
     printf '%s\n' "$picker_args" | rg -q -- '<100\(down' || fail 'preview does not adapt to narrow windows'
 }
 test_find_picker_rows() {
@@ -401,8 +401,18 @@ test_tags_exact() {
     assert_equal "$NOTES_DIR/work.md" "$editor_last"
     assert_equal +4 "${editor_values[${#editor_values[@]}-3]}"
     contains "$TEST_PICKER_ARGS" '\+\{2\}-/2'
+    rm -f "$TEST_PICKER_ROWS" "$TEST_EDITOR_ARGS"
+    export TEST_PICKER_MATCH=work
+    run tags wrok; success; editor_args
+    assert_equal $'#Work\n#work' "$(head -n 2 "$TEST_PICKER_ROWS")"
+    assert_equal "$NOTES_DIR/work.md" "$editor_last"
+    assert_equal +2 "${editor_values[${#editor_values[@]}-3]}"
+    unset TEST_PICKER_MATCH
+    rm -f "$TEST_EDITOR_ARGS"
+    export TEST_PICKER_MODE=cancel
     run tags wrok; success
-    assert_equal 'No notes tagged #wrok. Similar tags: #Work #work' "$(cat "$case_dir/stdout")"
+    [ ! -e "$TEST_EDITOR_ARGS" ] || fail 'cancelled suggestion opened editor'
+    unset TEST_PICKER_MODE
     run tags zzz; success
     assert_equal 'No notes tagged #zzz.' "$(cat "$case_dir/stdout")"
     run tags; success
@@ -453,6 +463,11 @@ test_sanitized_preview() {
     assert_equal $'safe]52;c;payload\n\033[7mnext\033[0m' "$(cat "$case_dir/stdout")"
     NO_COLOR=1 run __preview "$case_dir/map" 1 mark; success
     if LC_ALL=C rg -q $'\033' "$case_dir/stdout"; then fail 'marked preview ignored NO_COLOR'; fi
+    fixture_note two.md $'# Title\nsee #work and a#b #x#y\n```\n# not heading\n```'
+    printf '%s\0%s\0' "$NOTES_DIR/two.md" 1 > "$case_dir/map"
+    TERM=xterm run __preview "$case_dir/map" 1; success
+    assert_equal $'\033[1;32m# Title\033[0m\nsee \033[36m#work\033[0m and a#b \033[36m#x\033[0m#y\n\033[2m```\033[0m\n\033[33m# not heading\033[0m\n\033[2m```\033[0m' \
+        "$(cat "$case_dir/stdout")"
 }
 test_environment_isolation() {
     fixture_note one.md 'needle'
