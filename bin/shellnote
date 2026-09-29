@@ -109,27 +109,78 @@ validate_note() {
     validate_note_location "$1"
     check_private "$1" 600
 }
+restore_note() {
+    local metadata
+    validate_note_location "$1"
+    file_metadata "$1" || exit 1
+    [ "${metadata%% *}" = "$UID" ] || die "editor changed note ownership: $1"
+    chmod 600 "$1" || die "cannot restore private note permissions: $1"
+    check_private "$1" 600
+}
+# Runs after the user's config so <leader> is set. The picker runs shellnote itself in a floating
+# terminal, and every note it opens is recorded so its permissions are checked after Neovim exits.
+# Neither the command nor the mapping replaces one the user already defined.
+switch_note_lua='
+local bash, app, opened = vim.env.SHELLNOTE_BASH, vim.env.SHELLNOTE_APP, vim.env.SHELLNOTE_OPENED
+vim.env.SHELLNOTE_BASH, vim.env.SHELLNOTE_APP, vim.env.SHELLNOTE_OPENED = nil, nil, nil
+local function open_note(path)
+  local file = io.open(opened, "ab")
+  if not file then return vim.notify("shellnote: cannot record opened note", vim.log.levels.ERROR) end
+  file:write(path, "\0")
+  file:close()
+  local ok, err = pcall(vim.cmd.edit, vim.fn.fnameescape(path))
+  if not ok then vim.notify(err, vim.log.levels.ERROR) end
+end
+local function switch_note()
+  local out = vim.fn.tempname()
+  local width = math.max(math.floor(vim.o.columns * 0.9), 20)
+  local height = math.max(math.floor(vim.o.lines * 0.8), 5)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  local win = vim.api.nvim_open_win(buf, true, { relative = "editor", width = width, height = height,
+    row = math.floor((vim.o.lines - height) / 2), col = math.floor((vim.o.columns - width) / 2),
+    style = "minimal", border = "rounded" })
+  local function done()
+    if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end
+    local ok, lines = pcall(vim.fn.readfile, out, "b")
+    os.remove(out)
+    if ok and lines[1] and lines[1] ~= "" then open_note(lines[1]) end
+  end
+  local cmd = { bash, app, "__pick", out }
+  if vim.fn.has("nvim-0.11") == 1 then
+    vim.fn.jobstart(cmd, { term = true, on_exit = done })
+  else
+    vim.fn.termopen(cmd, { on_exit = done })
+  end
+  vim.cmd.startinsert()
+end
+if vim.fn.exists(":Notes") ~= 2 then
+  vim.api.nvim_create_user_command("Notes", switch_note, { desc = "Switch to another shellnote note" })
+end
+if vim.fn.maparg("<leader>n", "n") == "" then
+  vim.keymap.set("n", "<leader>n", switch_note, { desc = "Switch note" })
+end'
 edit_note() {
-    local target=$1 line=$2 result=0
+    local target=$1 line=$2 result=0 path
     require_command nvim
     validate_note "$target"
-    nvim -n -i NONE \
+    opened_file=$(mktemp "${TMPDIR:-/tmp}/shellnote-opened.XXXXXXXX") || die 'cannot create editor metadata'
+    trap_cleanup
+    SHELLNOTE_BASH=$BASH SHELLNOTE_APP=$app_path SHELLNOTE_OPENED=$opened_file nvim -n -i NONE \
         --cmd 'set noswapfile nobackup nowritebackup noundofile shada=' \
         --cmd 'autocmd BufReadPre,BufNewFile * setlocal noswapfile noundofile | set nobackup nowritebackup shada=' \
         -c 'set noswapfile nobackup nowritebackup noundofile shada=' \
+        -c "lua $switch_note_lua" \
         "+$line" -- "$target" || result=$?
-    validate_note_location "$target"
-    local metadata
-    file_metadata "$target" || exit 1
-    [ "${metadata%% *}" = "$UID" ] || die "editor changed note ownership: $target"
-    chmod 600 "$target" || die "cannot restore private note permissions: $target"
-    check_private "$target" 600
+    restore_note "$target"
+    while IFS= read -r -d '' path; do restore_note "$path"; done < "$opened_file"
     return "$result"
 }
 stdin_piped() { [ -p /dev/stdin ] || [ -f /dev/stdin ]; }
 cleanup_temp() {
     [ -z "${picker_map:-}" ] || rm -f -- "$picker_map"
     [ -z "${capture_file:-}" ] || rm -f -- "$capture_file"
+    [ -z "${opened_file:-}" ] || rm -f -- "$opened_file"
 }
 # Removes temporary files on exit, including after Ctrl-C or a kill.
 trap_cleanup() {
@@ -387,7 +438,7 @@ picker() (
         --color='prompt:2:bold,pointer:2,marker:2,hl:3:underline,hl+:3:underline:bold,fg+:-1:bold,bg+:-1,gutter:-1'
         --color='preview-border:8,preview-label:6:bold')
     use_color || style=(--no-color)
-    fzf --height=80% --layout=reverse --border=rounded --border-label=" shellnote · $1 " --border-label-pos=3 \
+    fzf --height="${picker_height:-80%}" --layout=reverse --border=rounded --border-label=" shellnote · $1 " --border-label-pos=3 \
         --info=inline-right --pointer='▌' --marker='▌' --gutter=' ' --separator='─' --scrollbar='│' "${style[@]}" "${@:2}"
 )
 # Rows show age, title, and detail. Only the title and detail are searchable, and matching is
@@ -426,7 +477,7 @@ select_note() {
         padded+=("${result_titles[i]}$pad")
     done
     read_ages "${result_paths[@]}"
-    case "$action" in show) verb=print;; add) verb=append;; *) verb=edit;; esac
+    case "$action" in show) verb=print;; add) verb=append;; pick) verb=open;; *) verb=edit;; esac
     selected=$(
         for ((i=0; i<${#result_paths[@]}; i++)); do
             format_age "${mtimes[i]}"
@@ -451,6 +502,7 @@ open_result() {
     case "$1" in
         show) validate_note "${result_paths[$2]}"; sanitize < "${result_paths[$2]}";;
         add) append_capture "${result_paths[$2]}"; info "Added to: ${result_labels[$2]}";;
+        pick) printf '%s' "${result_paths[$2]}" > "$pick_file" || die 'cannot record picked note';;
         *) edit_note "${result_paths[$2]}" "${result_lines[$2]}";;
     esac
 }
@@ -893,6 +945,15 @@ main() {
             commit_notes "$(commit_message "$@")" || exit
             push_notes;;
         __complete) [ "$#" = 1 ] || die 'invalid completion request'; complete_words "$1";;
+        __pick)
+            # Neovim runs this in a floating terminal and opens the path written to the file.
+            [ "$#" = 1 ] || die 'invalid pick request'
+            pick_file=$1 picker_height=100%
+            load_notes
+            if [ "${#note_paths[@]}" = 0 ]; then info 'No notes yet.'; return; fi
+            sort_recent
+            results_from_notes
+            select_note pick;;
         __preview)
             [ "$#" = 2 ] || { [ "$#" = 3 ] && [ "$3" = mark ]; } || die 'invalid preview arguments'
             ensure_notes_dir; preview_note "$@";;

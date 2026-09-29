@@ -154,6 +154,18 @@ test_real_nvim_privacy() {
     assert_equal 1 "$(sed -n '6p' "$TEST_NVIM_RESULT")"
     assert_equal 1 "$(find "$NOTES_DIR" -type f | wc -l | tr -d ' ')"
 }
+test_switch_note_in_editor() {
+    fixture_note first.md '# First'
+    fixture_note second.md '# Second'
+    ln -sf "$project_dir/tests/helpers/nvim-real" "$case_dir/tools/nvim"
+    export TEST_REAL_NVIM="$real_nvim" TEST_NVIM_CONFIG="$project_dir/tests/helpers/switch.lua"
+    export TEST_NVIM_RESULT="$case_dir/nvim-result" TEST_PICKER_MATCH=Second
+    run edit first; success
+    assert_equal $'true\ntrue\nsecond.md' "$(cat "$TEST_NVIM_RESULT")"
+    assert_equal 600 "$(mode "$NOTES_DIR/second.md")"
+    picker_args | rg -q -- '--height=100%' || fail 'picker did not fill the window'
+    [ -z "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'shellnote-opened.*' -newer "$NOTES_DIR/first.md")" ] || fail 'left editor metadata'
+}
 test_missing_editor_creates_nothing() {
     rm "$case_dir/tools/nvim"
     export PATH="$case_dir/tools"
@@ -672,7 +684,7 @@ test_git_icase_pathspec_environment() {
     assert_equal '# Changed' "$(git_notes show HEAD:note.md)"
 }
 
-storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_unquoted_words test_command_options test_invalid_arguments test_real_nvim_privacy test_missing_editor_creates_nothing'
+storage_tests='test_init_permissions test_new_note test_repeated_title test_unicode_title test_editor_arguments test_editor_failure_preserves_note test_storage_symlink_rejected test_permissive_storage_rejected test_help_without_dependencies test_unquoted_words test_command_options test_invalid_arguments test_real_nvim_privacy test_switch_note_in_editor test_missing_editor_creates_nothing'
 selected=${1:-all}
 search_tests='test_browse_selection test_list_notes test_browse_recent_titles test_find_picker_rows test_list_age test_list_empty test_literal_search test_print_search test_piped_search_prints test_short_commands test_completion_words test_bash_completion test_zsh_completion_syntax test_smart_case_search test_print_search_tty test_show_note test_match_notes test_new_from_pipe test_add_from_pipe test_last_note test_tags_exact test_empty_and_cancelled_picker test_unusual_filenames test_private_search_only test_sanitized_preview test_environment_isolation test_no_color test_optional_emoji test_picker_failure test_editor_replaced_parent test_editor_replaced_root'
 git_tests='test_git_init test_commit_notes test_unrelated_staged_refused test_untracked_unrelated_ignored test_parent_repository_rejected test_git_environment_isolation test_push_local_remote test_sync_notes test_push_missing_upstream test_staged_symlink_refused test_unrelated_rename_refused test_git_literal_pathspec_environment test_git_icase_pathspec_environment'

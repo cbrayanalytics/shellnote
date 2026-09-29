@@ -34,6 +34,8 @@ source "$HOME/.local/shellnote/completions/shellnote.bash"
 
 Your existing Neovim configuration, including lazy.nvim, loads normally.
 No editor plugin is required.
+Inside a note, `<leader>n` or `:Notes` opens the note picker in a floating window and switches to the selection.
+Neither is added if your configuration already defines it.
 
 ## Create a note
 
