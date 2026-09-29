@@ -34,8 +34,17 @@ source "$HOME/.local/shellnote/completions/shellnote.bash"
 
 Your existing Neovim configuration, including lazy.nvim, loads normally.
 No editor plugin is required.
-Inside a note, `<leader>n` or `:Notes` opens the note picker in a floating window and switches to the selection.
-Neither is added if your configuration already defines it.
+Inside a note, these open pickers in a floating window and switch to the selection:
+
+| Keys | Command | Action |
+| --- | --- | --- |
+| `<leader>nn` | `:Notes` | Switch to another note. |
+| `<leader>nf` | `:NoteFind TEXT` | Search note text and jump to the selected line. |
+| `<leader>nt` | `:NoteTags [TAG]` | Pick a tag, then a note, and jump to the tag line. |
+| `<leader>nr` | `:NoteRun COMMAND` | Insert the command's output and errors below the cursor in a fenced code block. |
+
+Keys without text prompt for it. None is added if your configuration already defines it.
+`:NoteRun` waits for the command to finish, so avoid commands that run forever, such as `tail -f`.
 
 ## Create a note
 

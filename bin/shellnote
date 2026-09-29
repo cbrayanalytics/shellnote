@@ -117,22 +117,32 @@ restore_note() {
     chmod 600 "$1" || die "cannot restore private note permissions: $1"
     check_private "$1" 600
 }
-# Runs after the user's config so <leader> is set. The picker runs shellnote itself in a floating
-# terminal, and every note it opens is recorded so its permissions are checked after Neovim exits.
-# Neither the command nor the mapping replaces one the user already defined.
-switch_note_lua='
+# Runs after the user's config so <leader> is set. Pickers run shellnote itself in a floating
+# terminal, and every note they open is recorded so its permissions are checked after Neovim exits.
+# No command or mapping replaces one the user already defined.
+editor_lua='
 local bash, app, opened = vim.env.SHELLNOTE_BASH, vim.env.SHELLNOTE_APP, vim.env.SHELLNOTE_OPENED
 vim.env.SHELLNOTE_BASH, vim.env.SHELLNOTE_APP, vim.env.SHELLNOTE_OPENED = nil, nil, nil
-local function open_note(path)
+local levels = vim.log.levels
+local function take(path)
+  local file = io.open(path, "rb")
+  if not file then return "" end
+  local text = file:read("*a") or ""
+  file:close()
+  os.remove(path)
+  return text
+end
+local function open_note(path, line)
   local file = io.open(opened, "ab")
-  if not file then return vim.notify("shellnote: cannot record opened note", vim.log.levels.ERROR) end
+  if not file then return vim.notify("shellnote: cannot record opened note", levels.ERROR) end
   file:write(path, "\0")
   file:close()
-  local ok, err = pcall(vim.cmd.edit, vim.fn.fnameescape(path))
-  if not ok then vim.notify(err, vim.log.levels.ERROR) end
+  if line ~= "$" and not line:match("^%d+$") then line = "1" end
+  local ok, err = pcall(vim.cmd, "edit +" .. line .. " " .. vim.fn.fnameescape(path))
+  if not ok then vim.notify(err, levels.ERROR) end
 end
-local function switch_note()
-  local out = vim.fn.tempname()
+local function pick(args)
+  local out, log = vim.fn.tempname(), vim.fn.tempname()
   local width = math.max(math.floor(vim.o.columns * 0.9), 20)
   local height = math.max(math.floor(vim.o.lines * 0.8), 5)
   local buf = vim.api.nvim_create_buf(false, true)
@@ -140,13 +150,14 @@ local function switch_note()
   local win = vim.api.nvim_open_win(buf, true, { relative = "editor", width = width, height = height,
     row = math.floor((vim.o.lines - height) / 2), col = math.floor((vim.o.columns - width) / 2),
     style = "minimal", border = "rounded" })
-  local function done()
+  local function done(_, code)
     if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end
-    local ok, lines = pcall(vim.fn.readfile, out, "b")
-    os.remove(out)
-    if ok and lines[1] and lines[1] ~= "" then open_note(lines[1]) end
+    local line, path = take(out):match("^([^\n]*)\n(.+)$")
+    local message = vim.trim(take(log))
+    if path then open_note(path, line)
+    elseif message ~= "" then vim.notify(message, code == 0 and levels.INFO or levels.ERROR) end
   end
-  local cmd = { bash, app, "__pick", out }
+  local cmd = vim.list_extend({ bash, app, "__pick", out, log }, args)
   if vim.fn.has("nvim-0.11") == 1 then
     vim.fn.jobstart(cmd, { term = true, on_exit = done })
   else
@@ -154,12 +165,48 @@ local function switch_note()
   end
   vim.cmd.startinsert()
 end
-if vim.fn.exists(":Notes") ~= 2 then
-  vim.api.nvim_create_user_command("Notes", switch_note, { desc = "Switch to another shellnote note" })
+local function ask(prompt, completion, callback)
+  vim.ui.input({ prompt = prompt, completion = completion }, function(input)
+    if input and input ~= "" then callback(input) end
+  end)
 end
-if vim.fn.maparg("<leader>n", "n") == "" then
-  vim.keymap.set("n", "<leader>n", switch_note, { desc = "Switch note" })
-end'
+local function find(text)
+  if text == "" then return ask("Find in notes: ", nil, find) end
+  pick({ "find", text })
+end
+local function tags(tag)
+  pick(tag == "" and { "tags" } or { "tags", tag })
+end
+-- Inserts the output below the cursor in a fence longer than any backtick run inside it, like add.
+local function run(command)
+  if command == "" then return ask("Command: ", "shellcmd", run) end
+  local output = vim.fn.systemlist({ "sh", "-c", "{ " .. command .. "\n} 2>&1" })
+  local status = vim.v.shell_error
+  if #output == 0 then return vim.notify("shellnote: no output to add", levels.INFO) end
+  local longest = 0
+  for _, text in ipairs(output) do
+    for ticks in text:gmatch("`+") do longest = math.max(longest, #ticks) end
+  end
+  local fence = string.rep("`", math.max(3, longest + 1))
+  local lines = vim.list_extend({ fence }, output)
+  table.insert(lines, fence)
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  vim.api.nvim_buf_set_lines(0, row, row, false, lines)
+  vim.api.nvim_win_set_cursor(0, { row + #lines, 0 })
+  if status ~= 0 then vim.notify("shellnote: command exited with status " .. status, levels.WARN) end
+end
+local function define(name, opts, callback, key, desc, from_key)
+  if vim.fn.exists(":" .. name) ~= 2 then
+    opts.desc = desc
+    vim.api.nvim_create_user_command(name, function(o) callback(o.args) end, opts)
+  end
+  if vim.fn.maparg(key, "n") == "" then vim.keymap.set("n", key, from_key, { desc = desc }) end
+end
+define("Notes", { nargs = 0 }, function() pick({}) end, "<leader>nn", "Switch note", function() pick({}) end)
+define("NoteFind", { nargs = "*" }, find, "<leader>nf", "Search note text", function() find("") end)
+define("NoteTags", { nargs = "?" }, tags, "<leader>nt", "Browse notes by tag", function() tags("") end)
+define("NoteRun", { nargs = "*", complete = "shellcmd" }, run, "<leader>nr", "Insert command output",
+  function() run("") end)'
 edit_note() {
     local target=$1 line=$2 result=0 path
     require_command nvim
@@ -170,7 +217,7 @@ edit_note() {
         --cmd 'set noswapfile nobackup nowritebackup noundofile shada=' \
         --cmd 'autocmd BufReadPre,BufNewFile * setlocal noswapfile noundofile | set nobackup nowritebackup shada=' \
         -c 'set noswapfile nobackup nowritebackup noundofile shada=' \
-        -c "lua $switch_note_lua" \
+        -c "lua $editor_lua" \
         "+$line" -- "$target" || result=$?
     restore_note "$target"
     while IFS= read -r -d '' path; do restore_note "$path"; done < "$opened_file"
@@ -502,7 +549,7 @@ open_result() {
     case "$1" in
         show) validate_note "${result_paths[$2]}"; sanitize < "${result_paths[$2]}";;
         add) append_capture "${result_paths[$2]}"; info "Added to: ${result_labels[$2]}";;
-        pick) printf '%s' "${result_paths[$2]}" > "$pick_file" || die 'cannot record picked note';;
+        pick) printf '%s\n%s' "${result_lines[$2]}" "${result_paths[$2]}" > "$pick_file" || die 'cannot record picked note';;
         *) edit_note "${result_paths[$2]}" "${result_lines[$2]}";;
     esac
 }
@@ -560,7 +607,7 @@ browse_notes() {
     if [ "${#note_paths[@]}" = 0 ]; then info 'No notes yet. Create one: shellnote new Title'; return; fi
     sort_recent
     results_from_notes
-    select_note
+    select_note "$note_action"
 }
 # Sets REPLY to the note's "# " heading, falling back to its relative path with status 1.
 note_title() {
@@ -636,7 +683,7 @@ find_notes() {
     if [ "$print_matches" = true ]; then
         print_search_results "$query"
     else
-        select_note edit find
+        select_note "$note_action" find
     fi
 }
 # Fills heading_lines and heading_texts with one note's Markdown headings in line order.
@@ -805,7 +852,7 @@ tag_notes() {
             [ "${tagged_paths[j]}" != "${note_paths[i]}" ] || { result_lines[i]=${tagged_lines[j]}; break; }
         done
     done
-    select_note edit tag
+    select_note "$note_action" tag
 }
 notes_git() (
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
@@ -946,20 +993,25 @@ main() {
             push_notes;;
         __complete) [ "$#" = 1 ] || die 'invalid completion request'; complete_words "$1";;
         __pick)
-            # Neovim runs this in a floating terminal and opens the path written to the file.
-            [ "$#" = 1 ] || die 'invalid pick request'
-            pick_file=$1 picker_height=100%
-            load_notes
-            if [ "${#note_paths[@]}" = 0 ]; then info 'No notes yet.'; return; fi
-            sort_recent
-            results_from_notes
-            select_note pick;;
+            # Neovim runs this in a floating terminal and opens the line and path written to the
+            # pick file. Messages go to the log file so Neovim can show them once the window closes.
+            [ "$#" -ge 2 ] || die 'invalid pick request'
+            pick_file=$1 picker_height=100% note_action=pick
+            exec > "$2" 2>&1
+            shift 2
+            case "${1:-browse}" in
+                browse) [ "$#" -le 1 ] || die 'invalid pick request'; browse_notes;;
+                find) shift; [ "$#" -ge 1 ] || die 'find requires text'; find_notes "$*";;
+                tags) shift; [ "$#" -le 1 ] || die 'tags takes one tag'; tag_notes "${1:-}";;
+                *) die 'invalid pick request';;
+            esac;;
         __preview)
             [ "$#" = 2 ] || { [ "$#" = 3 ] && [ "$3" = mark ]; } || die 'invalid preview arguments'
             ensure_notes_dir; preview_note "$@";;
         *) die "unknown command: $command (see shellnote help)";;
     esac
 }
+note_action=edit
 app_path=${BASH_SOURCE[0]}
 case "$app_path" in /*) ;; *) app_path="$PWD/$app_path";; esac
 main "$@"

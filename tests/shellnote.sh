@@ -155,13 +155,14 @@ test_real_nvim_privacy() {
     assert_equal 1 "$(find "$NOTES_DIR" -type f | wc -l | tr -d ' ')"
 }
 test_switch_note_in_editor() {
-    fixture_note first.md '# First'
-    fixture_note second.md '# Second'
+    fixture_note first.md $'# First\n\nneedle here'
+    fixture_note second.md $'# Second\n#work'
     ln -sf "$project_dir/tests/helpers/nvim-real" "$case_dir/tools/nvim"
     export TEST_REAL_NVIM="$real_nvim" TEST_NVIM_CONFIG="$project_dir/tests/helpers/switch.lua"
-    export TEST_NVIM_RESULT="$case_dir/nvim-result" TEST_PICKER_MATCH=Second
+    export TEST_NVIM_RESULT="$case_dir/nvim-result"
     run edit first; success
-    assert_equal $'true\ntrue\nsecond.md' "$(cat "$TEST_NVIM_RESULT")"
+    assert_equal '<leader>nn=true <leader>nf=true <leader>nt=true <leader>nr=true' "$(head -n 4 "$TEST_NVIM_RESULT" | tr '\n' ' ' | sed 's/ $//')"
+    assert_equal $'second.md:1\nfirst.md:3\nsecond.md:2\n```|hi|```\nNo matches.' "$(sed -n '5,$p' "$TEST_NVIM_RESULT")"
     assert_equal 600 "$(mode "$NOTES_DIR/second.md")"
     picker_args | rg -q -- '--height=100%' || fail 'picker did not fill the window'
     [ -z "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'shellnote-opened.*' -newer "$NOTES_DIR/first.md")" ] || fail 'left editor metadata'
