@@ -57,9 +57,9 @@ nginx -t 2>&1 | shellnote add 04512
 ```
 
 `new` with piped input creates the note without opening the editor.
-`add` appends piped input to the note matching every word, or to the most recently modified note when no words are given.
-Output lands in a fenced code block, and empty input changes nothing.
-Input redirected from a file counts as piped.
+`add` appends piped input to the note matching every word, or to the most
+recently modified note when no words are given. Output lands in a fenced code
+block, and empty input changes nothing. Input redirected from a file counts as piped.
 
 ## Find and edit
 
